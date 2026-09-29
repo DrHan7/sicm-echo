@@ -53,23 +53,19 @@ from tqdm import tqdm
 def required_env_path(name):
     value = os.environ.get(name)
     if not value:
-        raise RuntimeError(
-            f"Set the {name} environment variable before running this script."
-        )
+        raise RuntimeError(f"Set the {name} environment variable before running this script.")
     return Path(value).expanduser()
 
 
-EXTERNAL_VIDEO_ROOT = required_env_path("SICM_EXTERNAL_VIDEO_ROOT")
-CHECKPOINT_DIR = Path(
-    os.environ.get("SICM_CHECKPOINT_DIR", "checkpoints")
-).expanduser()
+TEST_ROOT = required_env_path("SICM_EXTERNAL_VIDEO_ROOT")
+CHECKPOINT_DIR = Path(os.environ.get("SICM_CHECKPOINT_DIR", "checkpoints")).expanduser()
 ECHOJEPA_REPO_DIR = Path(
-    os.environ.get("ECHOJEPA_REPO_DIR", CHECKPOINT_DIR / "EchoJEPA")
+    os.environ.get("ECHOJEPA_REPO_DIR", str(CHECKPOINT_DIR / "EchoJEPA"))
 ).expanduser()
 LV_SEGMENTATION_CHECKPOINT = Path(
     os.environ.get(
         "LV_SEGMENTATION_CHECKPOINT",
-        CHECKPOINT_DIR / "deeplabv3_resnet50_random.pt",
+        str(CHECKPOINT_DIR / "deeplabv3_resnet50_random.pt"),
     )
 ).expanduser()
 MODEL_PATH = required_env_path("SICM_FINAL_MODEL")
@@ -88,6 +84,7 @@ OUTPUT_CSV = Path(
 OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
 
 
+# ============================================================
 # 1. GENERAL SETTINGS
 # ============================================================
 
@@ -120,9 +117,6 @@ SMOOTH_SIGMA = 1.2
 
 MIN_ED_DISTANCE = 6
 ED_PROMINENCE_FRACTION = 0.05
-
-RELAXED_MIN_ED_DISTANCE = 4
-RELAXED_ED_PROMINENCE_FRACTION = 0.015
 
 MIN_CYCLE_FRAMES = 6
 MAX_CYCLE_FRAMES = 90
@@ -508,69 +502,6 @@ def find_ed_peaks(
     return peaks
 
 
-def estimate_period_from_autocorrelation(
-    smooth,
-):
-
-    x = np.asarray(
-        smooth,
-        dtype=np.float64,
-    )
-
-    x = (
-        x
-        - np.mean(
-            x
-        )
-    )
-
-    n = len(
-        x
-    )
-
-    max_lag = min(
-        MAX_CYCLE_FRAMES,
-        n - 1,
-    )
-
-    min_lag = min(
-        MIN_CYCLE_FRAMES,
-        max_lag,
-    )
-
-    if max_lag <= min_lag:
-
-        return max(
-            1,
-            n - 1,
-        )
-
-    autocorr = np.correlate(
-        x,
-        x,
-        mode="full",
-    )[
-        n - 1:
-    ]
-
-    candidate_lags = np.arange(
-        min_lag,
-        max_lag + 1,
-    )
-
-    best_lag = int(
-        candidate_lags[
-            np.argmax(
-                autocorr[
-                    candidate_lags
-                ]
-            )
-        ]
-    )
-
-    return best_lag
-
-
 def build_cycle_candidate(
     smooth,
     area_range,
@@ -716,14 +647,10 @@ def detect_all_cycles(
 ):
 
     """
-    Return all adjacent ED-to-ED cycles found in one study.
+    Return all adjacent ED-to-ED cycles found by primary ED-peak detection.
 
-    Primary / relaxed peak detection:
-        every adjacent peak pair is retained.
-
-    Fallback:
-        if fewer than two ED peaks are detected, construct one interval
-        using autocorrelation or the extreme fallback.
+    If fewer than two ED peaks are detected, raise an error. No alternate
+    detector or synthetic fallback interval is used.
     """
 
     raw_area = np.asarray(
@@ -752,10 +679,6 @@ def detect_all_cycles(
         smooth
     )
 
-    # --------------------------------------------------------
-    # Pass 1: primary ED peaks
-    # --------------------------------------------------------
-
     ed_candidates = find_ed_peaks(
         smooth,
         area_range,
@@ -763,234 +686,42 @@ def detect_all_cycles(
         ED_PROMINENCE_FRACTION,
     )
 
-    method = (
-        "primary_peaks"
-    )
-
-    # --------------------------------------------------------
-    # Pass 2: relaxed ED peaks
-    # --------------------------------------------------------
-
-    if len(
-        ed_candidates
-    ) < 2:
-
-        ed_candidates = find_ed_peaks(
-            smooth,
-            area_range,
-            RELAXED_MIN_ED_DISTANCE,
-            RELAXED_ED_PROMINENCE_FRACTION,
+    if len(ed_candidates) < 2:
+        raise RuntimeError(
+            "Fewer than two ED peaks were detected with the primary settings; "
+            "cardiac-cycle detection failed."
         )
 
-        method = (
-            "relaxed_peaks"
-        )
+    cycles = []
 
-    # --------------------------------------------------------
-    # Use ALL adjacent ED pairs
-    # --------------------------------------------------------
-
-    if len(
-        ed_candidates
-    ) >= 2:
-
-        cycles = []
-
-        for i in range(
-            len(
-                ed_candidates
-            )
-            - 1
-        ):
-
-            candidate = build_cycle_candidate(
-                smooth,
-                area_range,
-                ed_candidates[
-                    i
-                ],
-                ed_candidates[
-                    i + 1
-                ],
-                method,
-            )
-
-            if candidate is not None:
-
-                cycles.append(
-                    candidate
-                )
-
-        if cycles:
-
-            return {
-                "cycles":
-                    cycles,
-
-                "smooth_area":
-                    smooth,
-
-                "ed_candidates":
-                    ed_candidates,
-
-                "detection_method":
-                    method,
-            }
-
-    # --------------------------------------------------------
-    # Pass 3: autocorrelation fallback
-    # --------------------------------------------------------
-
-    estimated_period = (
-        estimate_period_from_autocorrelation(
-            smooth
-        )
-    )
-
-    estimated_period = max(
-        1,
-        min(
-            estimated_period,
-            n_frames - 1,
-        ),
-    )
-
-    possible_starts = (
-        n_frames
-        - estimated_period
-    )
-
-    if possible_starts >= 1:
-
-        ed1 = int(
-            np.argmax(
-                smooth[
-                    :possible_starts
-                ]
-            )
-        )
-
-        ed2 = min(
-            ed1
-            + estimated_period,
-            n_frames - 1,
-        )
-
+    for i in range(len(ed_candidates) - 1):
         candidate = build_cycle_candidate(
             smooth,
             area_range,
-            ed1,
-            ed2,
-            "autocorrelation_fallback",
+            ed_candidates[i],
+            ed_candidates[i + 1],
+            "primary_peaks",
         )
 
         if candidate is not None:
+            cycles.append(candidate)
 
-            return {
-                "cycles":
-                    [
-                        candidate
-                    ],
-
-                "smooth_area":
-                    smooth,
-
-                "ed_candidates":
-                    ed_candidates,
-
-                "detection_method":
-                    "autocorrelation_fallback",
-            }
-
-    # --------------------------------------------------------
-    # Pass 4: extreme fallback
-    # --------------------------------------------------------
-
-    ed1 = int(
-        np.argmax(
-            smooth
-        )
-    )
-
-    span = max(
-        1,
-        min(
-            max(
-                MIN_CYCLE_FRAMES,
-                n_frames // 3,
-            ),
-            n_frames - 1,
-        ),
-    )
-
-    options = []
-
-    if (
-        ed1 - span
-        >= 0
-    ):
-
-        options.append(
-            ed1 - span
-        )
-
-    if (
-        ed1 + span
-        < n_frames
-    ):
-
-        options.append(
-            ed1 + span
-        )
-
-    if options:
-
-        ed2 = max(
-            options,
-            key=lambda idx:
-                smooth[
-                    idx
-                ],
-        )
-
-    else:
-
-        ed2 = (
-            0
-            if ed1 != 0
-            else n_frames - 1
-        )
-
-    candidate = build_cycle_candidate(
-        smooth,
-        area_range,
-        ed1,
-        ed2,
-        "extreme_fallback",
-    )
-
-    if candidate is None:
-
+    if not cycles:
         raise RuntimeError(
-            "Unable to construct any LV-area interval."
+            "No valid adjacent ED-to-ED cycles were found."
         )
 
     return {
-        "cycles":
-            [
-                candidate
-            ],
-
-        "smooth_area":
-            smooth,
-
-        "ed_candidates":
-            ed_candidates,
-
-        "detection_method":
-            "extreme_fallback",
+        "cycles": cycles,
+        "smooth_area": smooth,
+        "ed_candidates": ed_candidates,
+        "detection_method": "primary_peaks",
     }
 
+
+# ============================================================
+# 17. RESAMPLE VIDEO CYCLE + LV-AREA PHYSIOLOGY
+# ============================================================
 
 def resample_cycle(
     original_video,

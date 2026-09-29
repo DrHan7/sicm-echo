@@ -75,8 +75,6 @@ OUTPUT_ROOT = Path(
     os.environ.get("SICM_CV_OUTPUT_DIR", "outputs/patient_level_5fold")
 ).expanduser()
 PREPROCESS_DIR = OUTPUT_ROOT / "preprocessing"
-CYCLE_ROOT = PREPROCESS_DIR / "cycles"
-CYCLE_MANIFEST = PREPROCESS_DIR / "multi_cycle_manifest.csv"
 CV_DIR = OUTPUT_ROOT / "cross_validation"
 
 for path, description in [
@@ -89,7 +87,7 @@ for path, description in [
     if not path.exists():
         raise FileNotFoundError(f"Cannot find {description}:\n{path}")
 
-for output_path in [OUTPUT_ROOT, PREPROCESS_DIR, CYCLE_ROOT, CV_DIR]:
+for output_path in [OUTPUT_ROOT, PREPROCESS_DIR, CV_DIR]:
     output_path.mkdir(parents=True, exist_ok=True)
 
 # ============================================================
@@ -363,7 +361,12 @@ def to_grayscale_255(x):
     return x.clamp(0, 255)
 
 
-def estimate_seg_normalization(df):
+def estimate_seg_normalization(df, save_path=None):
+    if df.empty:
+        raise RuntimeError(
+            "Cannot estimate segmentation normalization from an empty training fold."
+        )
+
     selected = (
         df if len(df) <= NORMALIZATION_SAMPLE_VIDEOS
         else df.sample(NORMALIZATION_SAMPLE_VIDEOS, random_state=SEED)
@@ -391,13 +394,17 @@ def estimate_seg_normalization(df):
         channel_sq_sum += (flat * flat).sum(1)
         total_pixels += flat.shape[1]
 
+    if total_pixels == 0:
+        raise RuntimeError("No pixels were available for segmentation normalization.")
+
     mean = (channel_sum / total_pixels).float()
     var = (channel_sq_sum / total_pixels - mean.double() ** 2).clamp_min(1e-8)
     std = torch.sqrt(var).float()
 
-    pd.DataFrame(
-        {"channel": ["R", "G", "B"], "mean": mean.numpy(), "std": std.numpy()}
-    ).to_csv(PREPROCESS_DIR / "segmentation_input_normalization.csv", index=False)
+    if save_path is not None:
+        pd.DataFrame(
+            {"channel": ["R", "G", "B"], "mean": mean.numpy(), "std": std.numpy()}
+        ).to_csv(save_path, index=False)
 
     return mean, std
 
@@ -646,23 +653,77 @@ MANIFEST_COLUMNS = [
 ]
 
 
-def preprocess_all(df):
-    if CYCLE_MANIFEST.exists() and not FORCE_REPROCESS_CYCLES:
-        manifest = pd.read_csv(CYCLE_MANIFEST, dtype={"id": str})
-        used = manifest[manifest["status"] == "USED"]
+def preprocess_all(df, normalization_fit_df, fold_dir):
+    """Extract cycles using normalization fitted only on this fold's train videos."""
+    preprocessing_dir = fold_dir / "preprocessing"
+    cycle_root = preprocessing_dir / "cycles"
+    cycle_manifest = preprocessing_dir / "multi_cycle_manifest.csv"
+    normalization_path = preprocessing_dir / "segmentation_input_normalization.csv"
+    normalization_ids_path = (
+        preprocessing_dir / "segmentation_normalization_training_ids.csv"
+    )
+    preprocessing_dir.mkdir(parents=True, exist_ok=True)
 
-        if len(used) and all(
-            Path(r["cycle_path"]).exists() and Path(r["area_curve_path"]).exists()
-            for _, r in used.iterrows()
-        ):
-            print("Reusing existing fresh cycle cache.")
-            return manifest
+    target_ids = set(df["id"].astype(str))
+    fit_ids = set(normalization_fit_df["id"].astype(str))
+    if not fit_ids:
+        raise RuntimeError("The fold has no training videos for normalization.")
+    if not fit_ids.issubset(target_ids):
+        raise RuntimeError("Normalization fit videos must belong to this fold's data.")
+    if df["id"].astype(str).duplicated().any():
+        raise RuntimeError("Cycle preprocessing expects one raw video per patient.")
 
-    if CYCLE_ROOT.exists():
-        shutil.rmtree(CYCLE_ROOT)
-    CYCLE_ROOT.mkdir(parents=True, exist_ok=True)
+    selected_fit_df = (
+        normalization_fit_df
+        if len(normalization_fit_df) <= NORMALIZATION_SAMPLE_VIDEOS
+        else normalization_fit_df.sample(
+            NORMALIZATION_SAMPLE_VIDEOS, random_state=SEED
+        )
+    )
+    fit_id_order = selected_fit_df["id"].astype(str).tolist()
+    mean, std = estimate_seg_normalization(normalization_fit_df)
 
-    mean, std = estimate_seg_normalization(df)
+    if not FORCE_REPROCESS_CYCLES and all(
+        path.exists()
+        for path in [cycle_manifest, normalization_path, normalization_ids_path]
+    ):
+        try:
+            cached_manifest = pd.read_csv(cycle_manifest, dtype={"id": str})
+            cached_norm = pd.read_csv(normalization_path).set_index("channel")
+            cached_fit_ids = pd.read_csv(
+                normalization_ids_path, dtype={"id": str}
+            )["id"].tolist()
+            cached_mean = cached_norm.loc[["R", "G", "B"], "mean"].to_numpy(float)
+            cached_std = cached_norm.loc[["R", "G", "B"], "std"].to_numpy(float)
+            used = cached_manifest[cached_manifest["status"] == "USED"]
+            cached_ids_match = set(cached_manifest["id"].astype(str)) == target_ids
+            cache_files_exist = len(used) > 0 and all(
+                Path(row["cycle_path"]).exists()
+                and Path(row["area_curve_path"]).exists()
+                for _, row in used.iterrows()
+            )
+            cache_normalization_matches = (
+                cached_fit_ids == fit_id_order
+                and np.allclose(cached_mean, mean.numpy(), rtol=0, atol=1e-6)
+                and np.allclose(cached_std, std.numpy(), rtol=0, atol=1e-6)
+            )
+            if cached_ids_match and cache_files_exist and cache_normalization_matches:
+                print(f"Reusing fold {fold_dir.name} cycle cache.")
+                return cached_manifest
+        except (KeyError, ValueError, OSError, pd.errors.ParserError):
+            pass
+
+    if cycle_root.exists():
+        shutil.rmtree(cycle_root)
+    cycle_root.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(
+        {"channel": ["R", "G", "B"], "mean": mean.numpy(), "std": std.numpy()}
+    ).to_csv(normalization_path, index=False)
+    pd.DataFrame({"id": fit_id_order}).to_csv(
+        normalization_ids_path, index=False
+    )
+
     segmenter = build_lv_segmenter(LV_SEGMENTATION_CHECKPOINT)
 
     records = []
@@ -672,7 +733,7 @@ def preprocess_all(df):
     ):
         sample_id = str(row["id"])
         video_path = str(row["video_path"])
-        folder = CYCLE_ROOT / sample_id
+        folder = cycle_root / sample_id
         folder.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -752,11 +813,11 @@ def preprocess_all(df):
 
         if (i + 1) % 25 == 0:
             pd.DataFrame(records, columns=MANIFEST_COLUMNS).to_csv(
-                CYCLE_MANIFEST, index=False
+                cycle_manifest, index=False
             )
 
     manifest = pd.DataFrame(records, columns=MANIFEST_COLUMNS)
-    manifest.to_csv(CYCLE_MANIFEST, index=False)
+    manifest.to_csv(cycle_manifest, index=False)
 
     del segmenter
     gc.collect()
@@ -766,26 +827,13 @@ def preprocess_all(df):
     return manifest
 
 
-manifest = preprocess_all(full_df)
-print("\nCycle extraction status:")
-print(manifest["status"].value_counts(dropna=False))
-
-used = manifest[manifest["status"] == "USED"].copy()
-
-classification_df = used.merge(
-    full_df[["id", "label"]],
-    on="id",
-    how="inner",
-)
-classification_df["label"] = classification_df["label"].astype(int)
-
 patient_df = (
-    classification_df[["id", "label"]]
+    full_df[["id", "label"]]
     .drop_duplicates("id")
     .reset_index(drop=True)
 )
 
-print("\nPatients entering CV:", len(patient_df))
+print("\nPatients entering fold assignment:", len(patient_df))
 print(patient_df["label"].value_counts().sort_index())
 
 
@@ -1909,15 +1957,47 @@ def train_one_fold(fold):
     fold_dir = CV_DIR / f"fold_{fold}"
     fold_dir.mkdir(parents=True, exist_ok=True)
 
-    train_ids = set(
-        patient_df.loc[patient_df["fold"] != fold, "id"].astype(str)
-    )
-    val_ids = set(
-        patient_df.loc[patient_df["fold"] == fold, "id"].astype(str)
-    )
+    assigned_train_patients = patient_df[
+        patient_df["fold"] != fold
+    ].copy()
+    assigned_val_patients = patient_df[
+        patient_df["fold"] == fold
+    ].copy()
+    train_ids = set(assigned_train_patients["id"].astype(str))
+    val_ids = set(assigned_val_patients["id"].astype(str))
 
     if train_ids & val_ids:
         raise RuntimeError("Patient leakage detected.")
+
+    assigned_train_patients.to_csv(
+        fold_dir / "assigned_train_ids.csv", index=False
+    )
+    assigned_val_patients.to_csv(
+        fold_dir / "assigned_validation_ids.csv", index=False
+    )
+
+    train_video_df = full_df[full_df["id"].isin(train_ids)].copy()
+    val_video_df = full_df[full_df["id"].isin(val_ids)].copy()
+    fold_video_df = full_df[full_df["id"].isin(train_ids | val_ids)].copy()
+
+    manifest = preprocess_all(
+        fold_video_df,
+        normalization_fit_df=train_video_df,
+        fold_dir=fold_dir,
+    )
+    manifest.to_csv(
+        fold_dir / "preprocessing" / "multi_cycle_manifest.csv", index=False
+    )
+    print(f"\nFold {fold} cycle extraction status:")
+    print(manifest["status"].value_counts(dropna=False))
+
+    used = manifest[manifest["status"] == "USED"].copy()
+    classification_df = used.merge(
+        full_df[["id", "label"]],
+        on="id",
+        how="inner",
+    )
+    classification_df["label"] = classification_df["label"].astype(int)
 
     train_cycles = (
         classification_df[
@@ -1934,14 +2014,57 @@ def train_one_fold(fold):
         .reset_index(drop=True)
     )
 
-    train_patients = (
-        patient_df[patient_df["id"].isin(train_ids)]
-        .copy()
+    successful_ids = set(classification_df["id"].astype(str))
+    train_patients = assigned_train_patients[
+        assigned_train_patients["id"].isin(train_ids & successful_ids)
+    ].copy()
+    val_patients = assigned_val_patients[
+        assigned_val_patients["id"].isin(val_ids & successful_ids)
+    ].copy()
+
+    train_failed_ids = train_ids - successful_ids
+    val_failed_ids = val_ids - successful_ids
+
+    def write_failed_ids(ids, output_path):
+        failure_rows = manifest[
+            manifest["id"].astype(str).isin(ids)
+            & (manifest["status"] != "USED")
+        ][["id", "video_path", "status", "error"]].drop_duplicates("id")
+        missing_rows = sorted(ids - set(failure_rows["id"].astype(str)))
+        if missing_rows:
+            extra = full_df[full_df["id"].astype(str).isin(missing_rows)][
+                ["id", "video_path"]
+            ].copy()
+            extra["status"] = "NO_CYCLES_IN_MANIFEST"
+            extra["error"] = "No successful cycle record was written for this ID."
+            failure_rows = pd.concat([failure_rows, extra], ignore_index=True)
+        failure_rows.to_csv(output_path, index=False)
+
+    write_failed_ids(
+        train_failed_ids,
+        fold_dir / "training_preprocessing_failures.csv",
     )
-    val_patients = (
-        patient_df[patient_df["id"].isin(val_ids)]
-        .copy()
+    write_failed_ids(
+        val_failed_ids,
+        fold_dir / "validation_preprocessing_failures.csv",
     )
+
+    if train_cycles.empty or train_patients.empty:
+        raise RuntimeError(
+            f"Fold {fold} has no successfully preprocessed training patients."
+        )
+    if val_cycles.empty or val_patients.empty:
+        raise RuntimeError(
+            f"Fold {fold} has no successfully preprocessed validation patients."
+        )
+    if train_patients["label"].nunique() < 2:
+        raise RuntimeError(
+            f"Fold {fold} training patients contain only one class after preprocessing."
+        )
+    if val_patients["label"].nunique() < 2:
+        raise RuntimeError(
+            f"Fold {fold} validation patients contain only one class after preprocessing; AUC is undefined."
+        )
 
     train_patients.to_csv(fold_dir / "train_ids.csv", index=False)
     val_patients.to_csv(fold_dir / "validation_ids.csv", index=False)
@@ -1969,8 +2092,8 @@ def train_one_fold(fold):
 
     print("\n" + "=" * 80)
     print(f"FOLD {fold}/{N_SPLITS}")
-    print("Train:", len(train_patients))
-    print("Validation:", len(val_patients))
+    print("Train candidates / used:", len(assigned_train_patients), "/", len(train_patients))
+    print("Validation candidates / used:", len(assigned_val_patients), "/", len(val_patients))
     print("=" * 80)
 
     backbone, spatial_pool, temporal_pool = train_ssl(
@@ -2185,8 +2308,12 @@ def train_one_fold(fold):
 
     metrics = {
         "fold": fold,
+        "training_candidate_patients": len(assigned_train_patients),
+        "validation_candidate_patients": len(assigned_val_patients),
         "train_patients": len(train_patients),
         "validation_patients": len(val_patients),
+        "training_preprocessing_failures": len(train_failed_ids),
+        "validation_preprocessing_failures": len(val_failed_ids),
         **{
             f"val_{k}": v
             for k, v in val_result["metrics"].items()
@@ -2232,6 +2359,19 @@ fold_metrics_df.to_csv(
     index=False,
 )
 
+validation_failure_parts = []
+for fold in folds:
+    failure_path = CV_DIR / f"fold_{fold}" / "validation_preprocessing_failures.csv"
+    if failure_path.exists():
+        failure_df = pd.read_csv(failure_path, dtype={"id": str})
+        failure_df["fold"] = fold
+        validation_failure_parts.append(failure_df)
+
+if validation_failure_parts:
+    pd.concat(validation_failure_parts, ignore_index=True).to_csv(
+        CV_DIR / "validation_preprocessing_failures.csv", index=False
+    )
+
 
 # ============================================================
 # 19. FINAL OOF
@@ -2250,10 +2390,33 @@ else:
     if oof["id"].duplicated().any():
         raise RuntimeError("Duplicate IDs found in OOF predictions.")
 
-    if len(oof) != len(patient_df):
+    expected_oof_count = int(fold_metrics_df["validation_patients"].sum())
+    if len(oof) != expected_oof_count:
         raise RuntimeError(
-            f"OOF patient count mismatch: {len(oof)} vs {len(patient_df)}"
+            f"OOF patient count mismatch: {len(oof)} vs {expected_oof_count} successfully preprocessed validation patients"
         )
+
+    assigned_fold_by_id = patient_df.set_index("id")["fold"]
+    expected_fold = oof["id"].map(assigned_fold_by_id)
+    if expected_fold.isna().any() or not np.array_equal(
+        expected_fold.to_numpy(dtype=int), oof["fold"].to_numpy(dtype=int)
+    ):
+        raise RuntimeError("OOF predictions do not match the patient-level fold assignment.")
+
+    missing_oof_ids = set(patient_df["id"].astype(str)) - set(oof["id"].astype(str))
+    if missing_oof_ids:
+        missing_path = CV_DIR / "validation_preprocessing_failures.csv"
+        if not missing_path.exists():
+            raise RuntimeError(
+                "Some assigned patients have no OOF prediction and no recorded validation preprocessing failure."
+            )
+        recorded_failures = set(
+            pd.read_csv(missing_path, dtype={"id": str})["id"].astype(str)
+        )
+        if missing_oof_ids != recorded_failures:
+            raise RuntimeError(
+                "Patients without OOF predictions do not match the recorded validation preprocessing failures."
+            )
 
     oof = oof.sort_values("id").reset_index(drop=True)
     oof.to_csv(
@@ -2339,8 +2502,9 @@ else:
         f"{summary['sd_fold_auc']:.4f}"
     )
 
-print("\nFresh cycle manifest:")
-print(CYCLE_MANIFEST)
+print("\nFold-specific cycle manifests:")
+for fold in folds:
+    print(CV_DIR / f"fold_{fold}" / "preprocessing" / "multi_cycle_manifest.csv")
 
 print("\nCV output:")
 print(CV_DIR)

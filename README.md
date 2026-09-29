@@ -10,8 +10,10 @@ This repository contains the supplied training, patient-level cross-validation, 
 .
 |-- scripts/
 |   |-- train.py
+|   |-- train_echojepa_baseline.py
 |   |-- cross_validate_patient_5fold.py
 |   |-- infer_external.py
+|   |-- infer_echojepa_baseline.py
 |   `-- evaluate_external_test_auc.py
 |-- docs/
 |   |-- data_format.md
@@ -22,14 +24,15 @@ This repository contains the supplied training, patient-level cross-validation, 
 `-- LICENSE
 ~~~
 
-The four scripts were reorganized from the supplied source files. Only local path configuration and output destinations were made environment-configurable. Model architecture, preprocessing, hyperparameters, cycle-detection logic, and evaluation logic were retained. See the methodology audit before interpreting a run: it records differences between the manuscript and the supplied implementations that need author review.
+The six scripts were reorganized from the supplied source files. Local paths and output destinations were made environment-configurable. The new patient-level CV source fits segmentation normalization within each training fold, and external inference now uses the same primary ED-peak detector as development. See the methodology audit for these updates and remaining differences that need author review.
 
 ## Workflow
 
-1. **Train the final development-cohort model** with scripts/train.py. It uses every valid labeled development ID, performs LV segmentation and cardiac-cycle extraction, runs self-supervised adaptation, then supervised two-stage patient-level MIL training. Its reported training metrics are in-sample.
-2. **Run internal validation** with scripts/cross_validate_patient_5fold.py. It assigns unique patient IDs to stratified folds and writes pooled out-of-fold (OOF) predictions and fold-level artifacts. The current implementation estimates LV-segmentation input normalization before assigning folds; this is documented for review.
-3. **Run external inference** with scripts/infer_external.py. It reads the trained final model and training-derived normalization, does not read labels, and writes one probability per input ID.
-4. **Evaluate external predictions** with scripts/evaluate_external_test_auc.py. It joins a prepared binary label file to full-model and EchoJEPA baseline prediction files. One label definition is evaluated per invocation; prepare separate label files for the primary and sensitivity definitions.
+1. **Train the physiology-informed model** with scripts/train.py. It performs self-supervised adaptation followed by supervised two-stage patient-level MIL training. Its training metrics are in-sample.
+2. **Train the direct EchoJEPA baseline** with scripts/train_echojepa_baseline.py. It uses the same cycle extraction, then averages EchoJEPA cycle features before an MLP classifier. Its training metrics are also in-sample.
+3. **Run internal validation** with scripts/cross_validate_patient_5fold.py. It assigns IDs to stratified patient folds, fits segmentation normalization on each training fold, and writes OOF predictions plus preprocessing-failure records.
+4. **Run both external inference scripts** with scripts/infer_external.py and scripts/infer_echojepa_baseline.py. Each loads its locked model and training-derived segmentation normalization, reads no labels, and writes probabilities by pseudonymous ID.
+5. **Evaluate external predictions** with scripts/evaluate_external_test_auc.py. It joins prepared binary labels to the full-model and baseline predictions. One label definition is evaluated per invocation; prepare separate label files for the primary and sensitivity definitions.
 
 Clinical cohort construction, Sepsis-3 identification, cardiac exclusion rules, time-window selection, and SICM reference-label derivation are outside the supplied scripts. Prepare those inputs under the applicable data-access and governance rules. Do not place data or labels in this repository.
 
@@ -91,6 +94,24 @@ The source settings use 10 self-supervised epochs, 10 frozen-backbone Stage A ep
 
 The final model is written to outputs/full_model/final_model.pt; the segmentation normalization used for inference is written beside it as data_normalization.csv. The script also writes local manifests, histories, and patient-level predictions. These are run outputs and must remain outside version control.
 
+## Direct EchoJEPA baseline training
+
+Use the same development videos, binary labels, EchoJEPA initialization, and LV-segmentation checkpoint as the full model:
+
+~~~bash
+export SICM_VIDEO_ROOT="/secure/path/development/videos"
+export SICM_LABEL_CSV="/secure/path/development/id_label.csv"
+export SICM_CHECKPOINT_DIR="checkpoints"
+export ECHOJEPA_REPO_DIR="checkpoints/EchoJEPA"
+export ECHOJEPA_CHECKPOINT="checkpoints/vitl-vmix22m-pt220-c55.pt"
+export LV_SEGMENTATION_CHECKPOINT="checkpoints/deeplabv3_resnet50_random.pt"
+export SICM_BASELINE_OUTPUT_DIR="outputs/echojepa_baseline"
+
+python scripts/train_echojepa_baseline.py
+~~~
+
+This script extracts adjacent primary-peak ED-to-ED cycles, uses EchoJEPA ViT-L features with mean pooling across tokens and cycles, and trains an MLP classifier. It does not use LV-area physiological features or self-supervised adaptation. Training uses 10 frozen-backbone Stage A epochs and 20 Stage B epochs, with the last two backbone blocks unfrozen in Stage B. Its supervised loss uses the positive-class weight described above. Training metrics are in-sample, not an independent validation estimate. The final checkpoint and training-derived segmentation normalization are written under the configured output directory.
+
 ## Patient-level fivefold cross-validation
 
 Use the same development video and label inputs and checkpoint configuration as for training:
@@ -107,7 +128,7 @@ export SICM_CV_OUTPUT_DIR="outputs/patient_level_5fold"
 python scripts/cross_validate_patient_5fold.py
 ~~~
 
-Each fold starts from the supplied EchoJEPA checkpoint and trains on four folds. All cycles belonging to an ID stay in that ID's fold. The script writes fold assignments, per-fold checkpoints, predictions, metrics, and pooled OOF metrics. Do not treat training-fold metrics as validation results. The full-cohort segmentation-normalization step before fold assignment is disclosed in the audit document.
+Each fold starts from the supplied EchoJEPA checkpoint and trains on four folds. All cycles belonging to an ID stay in that ID's fold. The script fits segmentation normalization using only the four training folds and applies it to that fold's training and validation videos. It writes fold assignments, per-fold checkpoints, predictions, metrics, and preprocessing-failure records. Only successfully preprocessed patients enter that fold's training or OOF metrics; see the audit for details. The source defaults to reprocessing cycles for the CV run, which can take substantial time. Do not treat training-fold metrics as validation results.
 
 ## External inference
 
@@ -125,7 +146,25 @@ export SICM_EXTERNAL_OUTPUT_CSV="outputs/external/physiology_informed_test_predi
 python scripts/infer_external.py
 ~~~
 
-The prediction CSV includes the pseudonymous ID, input filename/path relative to the configured external-video root, number of cycles, SICM probability, a 0.5-threshold prediction, and a success/error status. It is patient-level output and must not be committed.
+The full-model prediction CSV includes the pseudonymous ID, input filename/path relative to the configured external-video root, number of cycles, SICM probability, a 0.5-threshold prediction, and a success/error status. Cycle extraction uses the primary ED-peak rule and does not add relaxed or fallback detection. The predictions are patient-level output and must not be committed.
+
+### EchoJEPA baseline inference
+
+Run baseline inference against the same external video layout. Point it to the baseline checkpoint and its training-set segmentation normalization:
+
+~~~bash
+export SICM_EXTERNAL_VIDEO_ROOT="/secure/path/external/videos"
+export SICM_CHECKPOINT_DIR="checkpoints"
+export ECHOJEPA_REPO_DIR="checkpoints/EchoJEPA"
+export LV_SEGMENTATION_CHECKPOINT="checkpoints/deeplabv3_resnet50_random.pt"
+export SICM_BASELINE_FINAL_MODEL="outputs/echojepa_baseline/final_model.pt"
+export SICM_BASELINE_SEGMENTATION_NORMALIZATION_CSV="outputs/echojepa_baseline/data_normalization.csv"
+export SICM_EXTERNAL_BASELINE_PREDICTIONS_CSV="outputs/external/echojepa_baseline_test_predictions.csv"
+
+python scripts/infer_echojepa_baseline.py
+~~~
+
+This baseline also uses primary ED peaks and all adjacent cycles, then averages the visual cycle features. It does not use the LV-area physiological representation, labels, or test-time training. Its prediction CSV has the same `id` and `sicm_probability` fields expected by the evaluator.
 
 ## External evaluation
 
@@ -142,7 +181,7 @@ python scripts/evaluate_external_test_auc.py
 
 The current evaluator calculates AUROC with a percentile bootstrap 95% confidence interval (2,000 resamples, seed 42), plus accuracy, sensitivity, specificity, and F1 at probability threshold 0.5. It writes merged ID/label/prediction tables and a ROC comparison. Run it separately with each prespecified sensitivity-analysis label file, using the same model probabilities. It does not derive labels from cTnT values.
 
-The supplied source set did not include the script that generates the EchoJEPA baseline prediction CSV required above. Until that source is added, baseline inference is an external prerequisite. The manuscript analyses not implemented by these scripts are listed in the audit.
+The baseline prediction file is generated by scripts/infer_echojepa_baseline.py. The manuscript analyses not implemented by these scripts are listed in the audit.
 
 ## Research use
 
