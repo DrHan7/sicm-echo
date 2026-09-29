@@ -1,0 +1,11 @@
+# Install a mutually compatible torch/torchvision pair for the local CUDA runtime first.
+torch>=2.3
+torchvision
+numpy
+pandas
+matplotlib
+scipy
+scikit-learn
+tqdm
+opencv-python
+
