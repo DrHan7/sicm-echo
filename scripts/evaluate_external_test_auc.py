@@ -197,6 +197,16 @@ def make_primary_paired_dataset(label_df, full_df, baseline_df):
     full_ids = set(full_df["id"]) & label_ids
     baseline_ids = set(baseline_df["id"]) & label_ids
 
+    missing_full = sorted(label_ids - full_ids)
+    missing_baseline = sorted(label_ids - baseline_ids)
+    if missing_full or missing_baseline:
+        raise RuntimeError(
+            "Every primary external-analysis ID must have a successful prediction "
+            "from both models.\n"
+            f"Missing full-model predictions ({len(missing_full)}): {missing_full[:20]}\n"
+            f"Missing baseline predictions ({len(missing_baseline)}): {missing_baseline[:20]}"
+        )
+
     if full_ids != baseline_ids:
         only_full = sorted(full_ids - baseline_ids)
         only_baseline = sorted(baseline_ids - full_ids)
@@ -512,6 +522,13 @@ def load_ctnt_labels(path):
 
 
 def compare_label_sets(reference, derived, name):
+    missing = sorted(set(reference["id"]) - set(derived["id"]))
+    if missing:
+        raise RuntimeError(
+            f"{name}: cTnT-derived labels are missing {len(missing)} required IDs: "
+            f"{missing[:20]}"
+        )
+
     merged = reference.merge(
         derived,
         on="id",
@@ -527,6 +544,13 @@ def compare_label_sets(reference, derived, name):
 
 
 def sensitivity_metrics(label_df, full_df, analysis_name):
+    missing = sorted(set(label_df["id"]) - set(full_df["id"]))
+    if missing:
+        raise RuntimeError(
+            f"{analysis_name}: {len(missing)} labeled IDs have no successful "
+            f"full-model prediction: {missing[:20]}"
+        )
+
     merged = (
         label_df.merge(full_df, on="id", how="inner")
         .sort_values("id")
