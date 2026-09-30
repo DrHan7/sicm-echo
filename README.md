@@ -187,7 +187,7 @@ The script calculates:
 - AUROC with percentile-bootstrap 95% CI (2,000 resamples; seed 42 by default).
 - Accuracy, sensitivity, specificity, F1 score, and confusion-matrix counts at the prespecified 0.5 probability threshold.
 - Brier score for the physiology-informed model and the EchoJEPA baseline.
-- A calibration curve for the physiology-informed model.
+- A calibration curve for the physiology-informed model with pointwise 95% confidence intervals.
 - Paired DeLong comparison of the two AUROCs, including the AUROC difference, 95% CI, and two-sided P value.
 - Decision-curve net benefit for the physiology-informed model, EchoJEPA baseline, treat-all, and treat-none strategies.
 - A paired primary-analysis table containing the identical patient IDs used by both models.
@@ -225,7 +225,7 @@ python scripts/evaluate_external_test_auc.py
 
 If raw cTnT data and prepared label files are both supplied, the evaluator cross-checks their labels and stops on disagreement. The same full-model probability table is reused for all sensitivity analyses.
 
-The manuscript specifies calibration-curve assessment and decision-curve analysis but does not state the calibration binning rule or exact DCA threshold grid. Repository defaults are 10 quantile calibration bins and threshold probabilities 0.01-0.99 in 0.01 increments; these presentation settings can be changed with SICM_CALIBRATION_BINS, SICM_CALIBRATION_STRATEGY, SICM_DCA_MIN_THRESHOLD, SICM_DCA_MAX_THRESHOLD, and SICM_DCA_STEP without changing model predictions.
+The manuscript specifies a calibration curve with pointwise 95% confidence intervals and decision-curve analysis, but it does not state the calibration binning rule, the method used to construct the pointwise calibration intervals, or the exact DCA threshold grid. Repository defaults are 10 quantile calibration bins, pointwise percentile-bootstrap intervals using the same bootstrap iteration count/seed, and threshold probabilities 0.01-0.99 in 0.01 increments. These presentation settings can be changed with SICM_CALIBRATION_BINS, SICM_CALIBRATION_STRATEGY, SICM_DCA_MIN_THRESHOLD, SICM_DCA_MAX_THRESHOLD, and SICM_DCA_STEP without changing model predictions.
 
 ## Research use
 
