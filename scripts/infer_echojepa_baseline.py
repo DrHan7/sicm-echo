@@ -1,5 +1,11 @@
 """
-External test inference for the cycle-preprocessed PURE EchoJEPA baseline.
+Locked external inference companion to scripts/train_echojepa_baseline.py.
+
+The training script is the source of truth for the baseline definition.
+This inference script mirrors its cardiac-cycle preprocessing, EchoJEPA ViT-L
+geometry, equal mean pooling across tokens and retained cycles, and MLP
+classifier. It loads the locked final_model.pt and the training-derived
+LV-segmentation normalization without fitting anything on the external cohort.
 
 Pipeline
 --------
