@@ -461,7 +461,6 @@ baseline_predictions = load_predictions(
 )
 
 
-
 full_external, full_metrics = evaluate_full_model(
     primary_labels,
     full_predictions,
@@ -475,7 +474,6 @@ full_external.to_csv(
 
 full_y = full_external["label"].to_numpy(dtype=int)
 full_prob = full_external["full_probability"].to_numpy(dtype=float)
-
 
 
 paired_external = (
@@ -702,7 +700,6 @@ fig.tight_layout()
 fig.savefig(EVALUATION_DIR / "external_roc_comparison.png", dpi=600)
 fig.savefig(EVALUATION_DIR / "external_roc_comparison.pdf")
 plt.close(fig)
-
 
 
 sensitivity_020, metrics_020 = evaluate_full_model(
