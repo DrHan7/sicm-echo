@@ -423,6 +423,10 @@ def prepare_input(npy_path, segmenter):
 
 # ============================================================
 # 4. BUILD EchoJEPA ViT-L ARCHITECTURE
+#
+# Same ViT-L geometry used by train_echojepa_baseline.py.
+# Activation checkpointing is disabled only for inference; it does not change
+# model parameters or the state_dict.
 # ============================================================
 
 def build_echojepa_vitl():
@@ -540,6 +544,21 @@ checkpoint = torch.load(
     weights_only=False,
 )
 
+if isinstance(checkpoint, dict):
+    expected_metadata = {
+        "base_model": "vitl-vmix22m-pt220-c55",
+        "num_frames": NUM_FRAMES,
+        "image_size": IMAGE_SIZE,
+        "sampling": "all adjacent primary ED-to-ED cycles; each resampled to 16 frames",
+        "pooling": "global mean pooling across all EchoJEPA spatiotemporal tokens from all cycles",
+    }
+    for key, expected_value in expected_metadata.items():
+        if key in checkpoint and checkpoint[key] != expected_value:
+            raise RuntimeError(
+                "Baseline checkpoint metadata does not match the locked training "
+                f"pipeline: {key}={checkpoint[key]!r}, expected {expected_value!r}."
+            )
+
 if (
     isinstance(
         checkpoint,
@@ -562,7 +581,7 @@ model = EchoJEPABaselineClassifier(
     build_echojepa_vitl()
 )
 
-load_result = model.load_state_dict(
+model.load_state_dict(
     state_dict,
     strict=True,
 )
@@ -604,6 +623,30 @@ if len(
 
     raise RuntimeError(
         f"No .npy files found under:\n{TEST_ROOT}"
+    )
+
+
+# External data use the immediate parent directory as the pseudonymous ID.
+# Require exactly one selected A4C NPY per ID so that paired evaluation cannot
+# silently receive duplicate predictions.
+paths_by_id = {}
+for path in npy_paths:
+    sample_id = str(path.parent.name).strip()
+    paths_by_id.setdefault(sample_id, []).append(path)
+
+duplicate_ids = {
+    sample_id: paths
+    for sample_id, paths in paths_by_id.items()
+    if len(paths) != 1
+}
+if duplicate_ids:
+    details = {
+        sample_id: [str(path.relative_to(TEST_ROOT)) for path in paths]
+        for sample_id, paths in duplicate_ids.items()
+    }
+    raise RuntimeError(
+        "Each external pseudonymous ID must have exactly one selected A4C NPY. "
+        f"Duplicate IDs/files: {details}"
     )
 
 
