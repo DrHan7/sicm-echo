@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 
 from scipy.stats import norm
-from sklearn.calibration import calibration_curve
 from sklearn.metrics import (
     accuracy_score,
     brier_score_loss,
