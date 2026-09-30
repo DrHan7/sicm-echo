@@ -49,9 +49,9 @@ from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
 
 
-# ============================================================
-# 0. PATHS
-# ============================================================
+
+
+
 
 def required_env_path(name):
     value = os.environ.get(name)
@@ -87,9 +87,9 @@ OUTPUT_CSV = Path(
 OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
 
 
-# ============================================================
-# 1. GENERAL SETTINGS
-# ============================================================
+
+
+
 
 DEVICE = torch.device(
     "cuda"
@@ -107,11 +107,11 @@ AMP_ENABLED = (
 )
 
 
-# ============================================================
-# 2. LV SEGMENTATION / CYCLE SETTINGS
-#
-# These values match the training pipeline.
-# ============================================================
+
+
+
+
+
 
 SEG_SIZE = 112
 SEG_BATCH_SIZE = 64
@@ -128,9 +128,9 @@ QC_MIN_AREA_EXCURSION_FRACTION = 0.06
 QC_MAX_ED_AREA_MISMATCH_FRACTION = 0.60
 
 
-# ============================================================
-# 3. EchoJEPA / MIL SETTINGS
-# ============================================================
+
+
+
 
 NUM_FRAMES = 16
 IMAGE_SIZE = 224
@@ -187,9 +187,9 @@ ECHOJEPA_STD = torch.tensor(
 )
 
 
-# ============================================================
-# 4. STARTUP CHECKS
-# ============================================================
+
+
+
 
 for path, description in [
     (
@@ -271,9 +271,9 @@ print(
 )
 
 
-# ============================================================
-# 5. LOAD TRAINING-SET NORMALIZATION FOR LV SEGMENTATION
-# ============================================================
+
+
+
 
 normalization_df = pd.read_csv(
     SEGMENTATION_NORMALIZATION_CSV
@@ -329,22 +329,22 @@ print(
 )
 
 
-# ============================================================
-# 6. PREPROCESSING FUNCTIONS
-# ============================================================
+
+
+
 
 
 def load_video_tchw(npy_path):
     array = np.asarray(np.load(npy_path, mmap_mode="r"))
 
     if array.ndim == 3:
-        # T, H, W
+
         x = torch.from_numpy(array.copy()).float().unsqueeze(1)
     elif array.ndim == 4 and array.shape[-1] in (1, 3):
-        # T, H, W, C
+
         x = torch.from_numpy(array.copy()).float().permute(0, 3, 1, 2)
     elif array.ndim == 4 and array.shape[1] in (1, 3):
-        # T, C, H, W
+
         x = torch.from_numpy(array.copy()).float()
     else:
         raise ValueError(f"Unsupported video shape {array.shape}: {npy_path}")
@@ -721,9 +721,9 @@ def detect_all_cycles(
     }
 
 
-# ============================================================
-# 17. RESAMPLE VIDEO CYCLE + LV-AREA PHYSIOLOGY
-# ============================================================
+
+
+
 
 def resample_cycle(
     original_video,
@@ -1096,9 +1096,9 @@ def tokens_to_spatial_grid(
     return tokens
 
 
-# ============================================================
-# 7. EchoJEPA INPUT PREPARATION
-# ============================================================
+
+
+
 
 def prepare_echojepa_cycle(
     cycle_array,
@@ -1156,14 +1156,14 @@ def prepare_echojepa_cycle(
     ).contiguous()
 
 
-# ============================================================
-# 8. BUILD EMPTY EchoJEPA ViT-L ARCHITECTURE
-#
-# final_model.pt already contains the trained backbone weights.
-# Therefore the official pretrained checkpoint does NOT need to be
-# loaded again here; the local EchoJEPA source code is only used to
-# construct the architecture.
-# ============================================================
+
+
+
+
+
+
+
+
 
 def build_echojepa_vitl():
 
@@ -1215,9 +1215,9 @@ def build_echojepa_vitl():
     return encoder
 
 
-# ============================================================
-# 9. PHASE-AWARE SPATIAL ATTENTION
-# ============================================================
+
+
+
 
 class SpatialAttentionPool(
     nn.Module
@@ -1294,9 +1294,9 @@ class SpatialAttentionPool(
         )
 
 
-# ============================================================
-# 10. PHASE-AWARE TEMPORAL ATTENTION
-# ============================================================
+
+
+
 
 class TemporalAttentionPool(
     nn.Module
@@ -1423,9 +1423,9 @@ class TemporalAttentionPool(
         )
 
 
-# ============================================================
-# 11. FINAL LV-AREA PHYSIOLOGY ENCODER
-# ============================================================
+
+
+
 
 class LVAreaEncoder(
     nn.Module
@@ -1437,9 +1437,9 @@ class LVAreaEncoder(
 
         super().__init__()
 
-        # Values are overwritten by the trained state_dict. Keeping them as
-        # buffers guarantees that external inference uses the training-derived
-        # feature-wise z-score constants.
+
+
+
         self.register_buffer(
             "phys_mean",
             torch.zeros(
@@ -1456,8 +1456,8 @@ class LVAreaEncoder(
             )
         )
 
-        # The 64-point LV-area curve is already normalized by mean ED area.
-        # No per-cycle LayerNorm is applied.
+
+
         self.curve_encoder = nn.Sequential(
             nn.Linear(
                 AREA_CURVE_POINTS,
@@ -1528,9 +1528,9 @@ class LVAreaEncoder(
         )
 
 
-# ============================================================
-# 12. MIL ATTENTION
-# ============================================================
+
+
+
 
 class CycleMILAttention(
     nn.Module
@@ -1591,9 +1591,9 @@ class CycleMILAttention(
         )
 
 
-# ============================================================
-# 13. FINAL LOCKED INFERENCE MODEL
-# ============================================================
+
+
+
 
 class SICMInferenceModel(
     nn.Module
@@ -1754,9 +1754,9 @@ class SICMInferenceModel(
         )
 
 
-# ============================================================
-# 14. LOAD THE SINGLE FINAL LOCKED MODEL
-# ============================================================
+
+
+
 
 def load_trained_model(
     model_path,
@@ -1942,8 +1942,8 @@ def load_trained_model(
         backbone=build_echojepa_vitl()
     )
 
-    # Exact loading is deliberate: this publication-facing inference script
-    # must run only the architecture that produced the reported locked model.
+
+
     model.load_state_dict(
         state_dict,
         strict=True,
@@ -1966,9 +1966,9 @@ def load_trained_model(
     return model
 
 
-# ============================================================
-# 15. PREPARE ONE NPY STUDY IN MEMORY
-# ============================================================
+
+
+
 
 def prepare_study(
     npy_path,
@@ -2074,12 +2074,12 @@ def prepare_study(
     )
 
 
-# ============================================================
-# 16. FIND TEST NPY FILES
-#
-# The parent folder name of each NPY is used as the output ID.
-# Nested folders are supported.
-# ============================================================
+
+
+
+
+
+
 
 npy_paths = sorted(
     [
@@ -2112,9 +2112,9 @@ print(
 )
 
 
-# ============================================================
-# 17. LOAD MODELS
-# ============================================================
+
+
+
 
 lv_segmenter = build_lv_segmenter(
     LV_SEGMENTATION_CHECKPOINT
@@ -2126,9 +2126,9 @@ model = load_trained_model(
 )
 
 
-# ============================================================
-# 18. TEST INFERENCE
-# ============================================================
+
+
+
 
 records = []
 
@@ -2291,9 +2291,9 @@ for npy_path in tqdm(
         )
 
 
-# ============================================================
-# 19. SAVE TEST MODEL RESULTS ONLY
-# ============================================================
+
+
+
 
 result_df = pd.DataFrame(
     records
