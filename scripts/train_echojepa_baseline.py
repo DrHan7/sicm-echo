@@ -70,9 +70,9 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 
-# ============================================================
-# 0. PATHS
-# ============================================================
+
+
+
 
 def required_env_path(name):
 
@@ -149,9 +149,9 @@ TRAIN_PREDICTIONS_PATH = (
 )
 
 
-# ============================================================
-# 1. RUN SETTINGS
-# ============================================================
+
+
+
 
 SEED = 42
 
@@ -195,9 +195,9 @@ GRAD_ACCUM_STEPS = 4
 GRAD_CLIP_NORM = 1.0
 
 
-# ============================================================
-# 2. EchoJEPA SETTINGS
-# ============================================================
+
+
+
 
 NUM_FRAMES = 16
 
@@ -248,14 +248,14 @@ ECHOJEPA_STD = torch.tensor(
 USE_ACTIVATION_CHECKPOINTING = True
 
 
-# ============================================================
-# 3. TRAINING SETTINGS
-# ============================================================
 
-# Stage A: frozen EchoJEPA backbone
+
+
+
+
 STAGE_A_HEAD_LR = 1e-4
 
-# Stage B: conservative partial fine-tuning
+
 STAGE_B_BACKBONE_LR = 2e-6
 STAGE_B_HEAD_LR = 1e-4
 
@@ -264,9 +264,9 @@ WEIGHT_DECAY = 1e-3
 UNFREEZE_LAST_N_BLOCKS = 2
 
 
-# ============================================================
-# 4. DATA AUGMENTATION
-# ============================================================
+
+
+
 
 AUG_BRIGHTNESS_PROB = 0.80
 AUG_BRIGHTNESS_RANGE = (
@@ -289,14 +289,14 @@ AUG_GAMMA_RANGE = (
 AUG_TRANSLATE_PROB = 0.50
 AUG_MAX_TRANSLATE = 8
 
-# No horizontal flip.
-# No temporal reversal.
-# No phase rolling.
 
 
-# ============================================================
-# 5. REPRODUCIBILITY
-# ============================================================
+
+
+
+
+
+
 
 def set_seed(seed):
 
@@ -324,9 +324,9 @@ set_seed(
 )
 
 
-# ============================================================
-# 6. STARTUP CHECKS
-# ============================================================
+
+
+
 
 for path, description in [
     (
@@ -411,14 +411,14 @@ print(
 )
 
 
-# ============================================================
-# 7. LOAD LABELS AND MATCH EXACT ID-NAMED NPY FILES
-#
-# Same development input convention as the full model:
-#   - label CSV contains exactly: id,label
-#   - VIDEO_ROOT is searched recursively for files named exactly <id>.npy
-#   - every labeled ID must match exactly one NPY file
-# ============================================================
+
+
+
+
+
+
+
+
 
 label_df = pd.read_csv(
     LABEL_CSV,
@@ -677,9 +677,9 @@ print(
 )
 
 
-# ============================================================
-# 9. RAW NPY LOADING
-# ============================================================
+
+
+
 
 def load_video_tchw(
     npy_path,
@@ -694,7 +694,7 @@ def load_video_tchw(
 
     if array.ndim == 3:
 
-        # T,H,W
+
         x = (
             torch.from_numpy(
                 array.copy()
@@ -715,7 +715,7 @@ def load_video_tchw(
         )
     ):
 
-        # T,H,W,C
+
         x = (            torch.from_numpy(
                 array.copy()
             )
@@ -738,7 +738,7 @@ def load_video_tchw(
         )
     ):
 
-        # T,C,H,W
+
         x = (
             torch.from_numpy(
                 array.copy()
@@ -843,12 +843,12 @@ def to_grayscale_01(
     return x.float()
 
 
-# ============================================================
-# 10. UNIFORM 16-FRAME SAMPLING
-#
-# This baseline intentionally does NOT perform ED/ES detection.
-# Frames are uniformly sampled from the complete cine loop.
-# ============================================================
+
+
+
+
+
+
 
 def uniform_sample_video(
     video,
@@ -895,9 +895,9 @@ def uniform_sample_video(
     return sampled
 
 
-# ============================================================
-# 11. TEMPORALLY CONSISTENT AUGMENTATION
-# ============================================================
+
+
+
 
 def random_translate(
     video,
@@ -936,7 +936,7 @@ def random_translate(
         ),
     )
 
-    # Remove wrapped pixels.
+
     if shift_y > 0:
         translated[
             :,
@@ -1049,9 +1049,9 @@ def augment_video(
     return video
 
 
-# ============================================================
-# 12. EchoJEPA INPUT PREPARATION
-# ============================================================
+
+
+
 
 def prepare_echojepa_input(
     npy_path,
@@ -1081,7 +1081,7 @@ def prepare_echojepa_input(
         align_corners=False,
     )
 
-    # T,1,H,W -> T,3,H,W
+
     video = video.repeat(
         1,
         3,
@@ -1114,7 +1114,7 @@ def prepare_echojepa_input(
         - mean
     ) / std
 
-    # T,C,H,W -> C,T,H,W
+
     return video.permute(
         1,
         0,
@@ -1123,9 +1123,9 @@ def prepare_echojepa_input(
     ).contiguous()
 
 
-# ============================================================
-# 13. DATASET
-# ============================================================
+
+
+
 
 class EchoJEPABaselineDataset(
     Dataset
@@ -1199,7 +1199,7 @@ def collate_fn(
     batch,
 ):
 
-    # Physical batch size is 1.
+
     return batch[
         0
     ]
@@ -1240,9 +1240,9 @@ eval_loader = DataLoader(
 )
 
 
-# ============================================================
-# 14. EchoJEPA CHECKPOINT HELPERS
-# ============================================================
+
+
+
 
 def _choose_encoder_state_dict(
     checkpoint,
@@ -1336,9 +1336,9 @@ def _clean_echojepa_key(
     return key
 
 
-# ============================================================
-# 15. LOAD OFFICIAL EchoJEPA ViT-L
-# ============================================================
+
+
+
 
 def load_echojepa_vitl(
     checkpoint_path,
@@ -1496,9 +1496,9 @@ def load_echojepa_vitl(
     return encoder
 
 
-# ============================================================
-# 16. PURE EchoJEPA BASELINE CLASSIFIER
-# ============================================================
+
+
+
 
 class EchoJEPABaselineClassifier(
     nn.Module
@@ -1513,10 +1513,10 @@ class EchoJEPABaselineClassifier(
 
         self.backbone = backbone
 
-        # No spatial attention.
-        # No temporal attention.
-        # No physiology branch.
-        # No MIL.
+
+
+
+
         self.classifier = nn.Sequential(
             nn.LayerNorm(
                 FEATURE_DIM
@@ -1543,7 +1543,7 @@ class EchoJEPABaselineClassifier(
         video,
     ):
 
-        # video: C,T,H,W
+
         if video.ndim == 4:
 
             video = video.unsqueeze(
@@ -1572,7 +1572,7 @@ class EchoJEPABaselineClassifier(
                 f"Unexpected EchoJEPA output shape: {tokens.shape}"
             )
 
-        # Direct global mean pooling over all spatiotemporal tokens.
+
         feature = tokens.mean(
             dim=1
         )
@@ -1600,9 +1600,9 @@ model = EchoJEPABaselineClassifier(
 )
 
 
-# ============================================================
-# 17. FREEZE / UNFREEZE
-# ============================================================
+
+
+
 
 def freeze_backbone(
     model,
@@ -1650,9 +1650,9 @@ def unfreeze_last_blocks(
         parameter.requires_grad = True
 
 
-# ============================================================
-# 18. CLASS WEIGHT
-# ============================================================
+
+
+
 
 n_negative = int(
     (
@@ -1694,9 +1694,9 @@ print(
 )
 
 
-# ============================================================
-# 19. OPTIMIZERS
-# ============================================================
+
+
+
 
 def make_stage_a_optimizer(
     model,
@@ -1786,9 +1786,9 @@ def make_stage_b_optimizer(
     )
 
 
-# ============================================================
-# 20. METRICS
-# ============================================================
+
+
+
 
 def calculate_metrics(
     labels,
@@ -1900,9 +1900,9 @@ def calculate_metrics(
     }
 
 
-# ============================================================
-# 21. TRAIN ONE EPOCH
-# ============================================================
+
+
+
 
 def train_one_epoch(
     model,
@@ -1913,7 +1913,7 @@ def train_one_epoch(
 
     model.train()
 
-    # Keep frozen backbone deterministic.
+
     if not any(
         parameter.requires_grad
         for parameter
@@ -2041,9 +2041,9 @@ def train_one_epoch(
     )
 
 
-# ============================================================
-# 22. EVALUATE TRAINING COHORT
-# ============================================================
+
+
+
 
 @torch.no_grad()
 def evaluate(
@@ -2134,9 +2134,9 @@ def evaluate(
     )
 
 
-# ============================================================
-# 23. AMP SCALER
-# ============================================================
+
+
+
 
 scaler = torch.amp.GradScaler(
     DEVICE_TYPE,
@@ -2144,9 +2144,9 @@ scaler = torch.amp.GradScaler(
 )
 
 
-# ============================================================
-# 24. RESUME OR FRESH START
-# ============================================================
+
+
+
 
 history = []
 
@@ -2231,7 +2231,7 @@ if (
             ]
         )
 
-    # Move optimizer states to GPU.
+
     for state in optimizer.state.values():
 
         for key, value in list(
@@ -2301,18 +2301,18 @@ else:
     )
 
 
-# ============================================================
-# 25. TRAINING LOOP
-# ============================================================
+
+
+
 
 for epoch in range(
     start_epoch,
     TOTAL_EPOCHS + 1,
 ):
 
-    # --------------------------------------------------------
-    # Switch to Stage B exactly once.
-    # --------------------------------------------------------
+
+
+
 
     if epoch == (
         STAGE_A_EPOCHS
@@ -2339,7 +2339,7 @@ for epoch in range(
             )
         )
 
-        # A new optimizer starts a new Stage-B schedule.
+
         scaler = torch.amp.GradScaler(
             DEVICE_TYPE,
             enabled=AMP_ENABLED,
@@ -2462,7 +2462,7 @@ for epoch in range(
     )
 
 
-    # Save the newest deterministic predictions.
+
     pred_df.to_csv(
         TRAIN_PREDICTIONS_PATH,
         index=False,
@@ -2518,9 +2518,9 @@ for epoch in range(
     )
 
 
-# ============================================================
-# 26. FINAL EVALUATION
-# ============================================================
+
+
+
 
 final_metrics, final_predictions = evaluate(
     model,
@@ -2535,9 +2535,9 @@ final_predictions.to_csv(
 )
 
 
-# ============================================================
-# 27. SAVE FINAL MODEL
-# ============================================================
+
+
+
 
 torch.save(
     {
@@ -2572,9 +2572,9 @@ torch.save(
 )
 
 
-# ============================================================
-# 28. SAVE ROC CURVE
-# ============================================================
+
+
+
 
 fpr, tpr, _ = roc_curve(
     final_predictions[
@@ -2640,9 +2640,9 @@ plt.savefig(
 plt.close()
 
 
-# ============================================================
-# 29. SAVE TRAINING CURVES
-# ============================================================
+
+
+
 
 history_df = pd.DataFrame(
     history
@@ -2731,9 +2731,9 @@ if not history_df.empty:
     plt.close()
 
 
-# ============================================================
-# 30. SUMMARY
-# ============================================================
+
+
+
 
 print(
     "\n"
