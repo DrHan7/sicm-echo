@@ -42,9 +42,9 @@ from sklearn.metrics import (
 from tqdm import tqdm
 
 
-# ============================================================
-# 1. PATHS
-# ============================================================
+
+
+
 
 def required_env_path(name):
     value = os.environ.get(name)
@@ -90,21 +90,21 @@ for path, description in [
 for output_path in [OUTPUT_ROOT, PREPROCESS_DIR, CV_DIR]:
     output_path.mkdir(parents=True, exist_ok=True)
 
-# ============================================================
-# 2. RUN MODE
-# ============================================================
 
-# First completely fresh run from raw NPY:
+
+
+
+
 FORCE_REPROCESS_CYCLES = True
 
-# Quick test:
-#   SSL=1, Stage A=2, Stage B=3
-# Formal:
-#   SSL=10, Stage A=10, Stage B=20
+
+
+
+
 QUICK_TEST = False
 
-# Formal 5-fold: None
-# Single Fold 1: 1
+
+
 RUN_ONLY_FOLD = None
 
 N_SPLITS = 5
@@ -117,9 +117,9 @@ else:
 TOTAL_CLS_EPOCHS = STAGE_A_EPOCHS + STAGE_B_EPOCHS
 
 
-# ============================================================
-# 3. GENERAL SETTINGS
-# ============================================================
+
+
+
 
 SEED = 42
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -225,9 +225,9 @@ if DEVICE_TYPE == "cuda":
     print("GPU           :", torch.cuda.get_device_name(0))
 
 
-# ============================================================
-# 4. RAW DATA / LABELS
-# ============================================================
+
+
+
 
 EXCLUDED = {
     "outcome", "outputs", "cycles", "preprocessing", "cross_validation",
@@ -314,9 +314,9 @@ print("Raw videos:", len(full_df))
 print(full_df["label"].value_counts().sort_index())
 
 
-# ============================================================
-# 5. RAW VIDEO HELPERS
-# ============================================================
+
+
+
 
 def load_video_tchw(path):
     arr = np.asarray(np.load(path, mmap_mode="r"))
@@ -409,9 +409,9 @@ def estimate_seg_normalization(df, save_path=None):
     return mean, std
 
 
-# ============================================================
-# 6. LV SEGMENTATION
-# ============================================================
+
+
+
 
 def build_lv_segmenter(path):
     try:
@@ -470,9 +470,9 @@ def lv_area_curve(path, model, mean, std):
     return original, np.concatenate(areas)
 
 
-# ============================================================
-# 7. CARDIAC CYCLE DETECTION
-# ============================================================
+
+
+
 
 def robust_range(x):
     return max(float(np.quantile(x, 0.95) - np.quantile(x, 0.05)), 1.0)
@@ -638,9 +638,9 @@ def save_qc(folder, raw_area, detection):
     plt.close(fig)
 
 
-# ============================================================
-# 8. FRESH PREPROCESSING CACHE
-# ============================================================
+
+
+
 
 MANIFEST_COLUMNS = [
     "id", "video_path", "status", "cycle_index", "n_cycles_in_study",
@@ -837,9 +837,9 @@ print("\nPatients entering fold assignment:", len(patient_df))
 print(patient_df["label"].value_counts().sort_index())
 
 
-# ============================================================
-# 9. CACHED CYCLE / AUGMENTATION
-# ============================================================
+
+
+
 
 def load_cached_cycle(path):
     arr = np.load(path)
@@ -918,9 +918,9 @@ def load_area_curve(path):
     return torch.from_numpy(x.copy()).float()
 
 
-# ============================================================
-# 10. DATASETS
-# ============================================================
+
+
+
 
 class CycleSSLDataset(Dataset):
     def __init__(self, df):
@@ -1041,9 +1041,9 @@ def mil_collate(batch):
     return batch[0]
 
 
-# ============================================================
-# 11. EchoJEPA MODEL LOADER
-# ============================================================
+
+
+
 
 def choose_encoder_state(ckpt):
     if not isinstance(ckpt, dict):
@@ -1135,9 +1135,9 @@ def load_echojepa():
     return encoder
 
 
-# ============================================================
-# 12. ATTENTION / SSL
-# ============================================================
+
+
+
 
 def token_grid(tokens):
     return tokens.reshape(
@@ -1402,9 +1402,9 @@ class CycleAwareEchoJEPA(nn.Module):
                 )
 
 
-# ============================================================
-# 13. MIL CLASSIFIER
-# ============================================================
+
+
+
 
 class LVAreaEncoder(nn.Module):
     def __init__(self, mean, std):
@@ -1564,9 +1564,9 @@ def unfreeze_last_blocks(model):
         p.requires_grad = True
 
 
-# ============================================================
-# 14. METRICS / EVALUATION
-# ============================================================
+
+
+
 
 def metrics_from_prob(y, p):
     y = np.asarray(y, dtype=int)
@@ -1676,9 +1676,9 @@ def bootstrap_auc_ci(y, p, n_bootstrap=2000):
     )
 
 
-# ============================================================
-# 15. PATIENT-LEVEL 5-FOLD SPLIT
-# ============================================================
+
+
+
 
 skf = StratifiedKFold(
     n_splits=N_SPLITS,
@@ -1710,9 +1710,9 @@ patient_df.to_csv(
 )
 
 
-# ============================================================
-# 16. FOLD-SPECIFIC SSL
-# ============================================================
+
+
+
 
 def train_ssl(train_cycle_df, fold_dir):
     dataset = CycleSSLDataset(train_cycle_df)
@@ -1887,9 +1887,9 @@ def train_ssl(train_cycle_df, fold_dir):
     return backbone, spatial_pool, temporal_pool
 
 
-# ============================================================
-# 17. TRAIN ONE FOLD
-# ============================================================
+
+
+
 
 PHYS_COLUMNS = [
     "fac",
@@ -2335,9 +2335,9 @@ def train_one_fold(fold):
     return val_pred, metrics
 
 
-# ============================================================
-# 18. RUN FOLDS
-# ============================================================
+
+
+
 
 folds = (
     list(range(1, N_SPLITS + 1))
@@ -2373,9 +2373,9 @@ if validation_failure_parts:
     )
 
 
-# ============================================================
-# 19. FINAL OOF
-# ============================================================
+
+
+
 
 if RUN_ONLY_FOLD is not None:
     pd.concat(oof_parts, ignore_index=True).to_csv(
