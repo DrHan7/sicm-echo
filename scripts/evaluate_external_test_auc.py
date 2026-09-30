@@ -350,33 +350,103 @@ def save_roc_plot(paired, full_metrics, baseline_metrics):
     plt.close(fig)
 
 
+def calibration_table_with_pointwise_ci(labels, probabilities):
+    y = np.asarray(labels, dtype=np.int64)
+    p = np.asarray(probabilities, dtype=np.float64)
+
+    if CALIBRATION_STRATEGY == "quantile":
+        edges = np.quantile(
+            p,
+            np.linspace(0.0, 1.0, CALIBRATION_BINS + 1),
+        )
+        edges = np.unique(edges)
+        if len(edges) < 2:
+            raise RuntimeError("Calibration probabilities do not define usable bins.")
+    else:
+        edges = np.linspace(0.0, 1.0, CALIBRATION_BINS + 1)
+
+    interior = edges[1:-1]
+    bin_index = np.digitize(p, interior, right=True)
+    n_bins_actual = len(edges) - 1
+
+    rows = []
+    for b in range(n_bins_actual):
+        mask = bin_index == b
+        if not np.any(mask):
+            continue
+        rows.append(
+            {
+                "bin": b + 1,
+                "n": int(mask.sum()),
+                "mean_predicted_probability": float(p[mask].mean()),
+                "observed_event_fraction": float(y[mask].mean()),
+            }
+        )
+
+    table = pd.DataFrame(rows)
+    if table.empty:
+        raise RuntimeError("No calibration bins were populated.")
+
+    rng = np.random.default_rng(BOOTSTRAP_SEED)
+    bootstrap_values = {
+        int(row["bin"]): []
+        for _, row in table.iterrows()
+    }
+
+    for _ in range(BOOTSTRAP_ITERATIONS):
+        idx = rng.integers(0, len(y), size=len(y))
+        yb = y[idx]
+        pb = p[idx]
+        bb = np.digitize(pb, interior, right=True)
+
+        for b in range(n_bins_actual):
+            mask = bb == b
+            if np.any(mask) and (b + 1) in bootstrap_values:
+                bootstrap_values[b + 1].append(float(yb[mask].mean()))
+
+    lower = []
+    upper = []
+    for bin_number in table["bin"].astype(int):
+        values = bootstrap_values[bin_number]
+        if values:
+            lower.append(float(np.percentile(values, 2.5)))
+            upper.append(float(np.percentile(values, 97.5)))
+        else:
+            lower.append(np.nan)
+            upper.append(np.nan)
+
+    table["observed_fraction_95ci_lower"] = lower
+    table["observed_fraction_95ci_upper"] = upper
+    return table
+
+
 def save_calibration(paired):
     y = paired["label"].to_numpy(dtype=np.int64)
     p = paired["full_probability"].to_numpy(dtype=np.float64)
 
-    fraction_positive, mean_predicted = calibration_curve(
-        y,
-        p,
-        n_bins=CALIBRATION_BINS,
-        strategy=CALIBRATION_STRATEGY,
-    )
-
-    calibration_df = pd.DataFrame(
-        {
-            "mean_predicted_probability": mean_predicted,
-            "observed_event_fraction": fraction_positive,
-        }
-    )
+    calibration_df = calibration_table_with_pointwise_ci(y, p)
     calibration_df.to_csv(
         EVALUATION_DIR / "external_calibration_curve.csv",
         index=False,
     )
 
+    x = calibration_df["mean_predicted_probability"].to_numpy(dtype=float)
+    observed = calibration_df["observed_event_fraction"].to_numpy(dtype=float)
+    lower = calibration_df["observed_fraction_95ci_lower"].to_numpy(dtype=float)
+    upper = calibration_df["observed_fraction_95ci_upper"].to_numpy(dtype=float)
+
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.plot([0, 1], [0, 1], linestyle="--", linewidth=1, label="Perfect calibration")
+    ax.fill_between(
+        x,
+        lower,
+        upper,
+        alpha=0.20,
+        label="Pointwise 95% CI",
+    )
     ax.plot(
-        mean_predicted,
-        fraction_positive,
+        x,
+        observed,
         marker="o",
         linewidth=1.5,
         label="Physiology-informed model",
