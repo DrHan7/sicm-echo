@@ -1,46 +1,3 @@
-"""
-Pure EchoJEPA baseline for SICM classification.
-
-Purpose
--------
-This script provides a clean foundation-model baseline for comparison with the
-full physiology-informed SICM framework.
-
-Baseline pipeline
------------------
-Raw/cropped echocardiographic NPY
-    -> uniformly sample 16 frames from the full cine loop
-    -> resize to 224 x 224
-    -> grayscale replicated to 3 channels
-    -> EchoJEPA ViT-L
-    -> global mean pooling over all spatiotemporal tokens
-    -> MLP classifier
-    -> patient-level SICM probability
-
-NOT included in this baseline
------------------------------
-- LV segmentation
-- LV area-time curve
-- ED/ES detection
-- ED-to-ED cardiac-cycle alignment
-- self-supervised cross-cycle adaptation
-- spatial attention
-- temporal attention
-- physiological descriptors
-- multiple-instance learning
-
-Dataset structure
------------------
-VIDEO_ROOT/
-    ID001.npy
-    nested/
-        ID002.npy
-    ...
-
-The label CSV must contain exactly two columns named id and label.
-Each labeled ID must match exactly one recursively discovered <ID>.npy file.
-No internal validation/test split is created.
-"""
 
 import gc
 import math
@@ -68,10 +25,6 @@ from sklearn.metrics import (
 
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-
-
-
-
 
 
 def required_env_path(name):
@@ -149,10 +102,6 @@ TRAIN_PREDICTIONS_PATH = (
 )
 
 
-
-
-
-
 SEED = 42
 
 QUICK_TEST = False
@@ -193,10 +142,6 @@ PHYSICAL_BATCH_SIZE = 1
 GRAD_ACCUM_STEPS = 4
 
 GRAD_CLIP_NORM = 1.0
-
-
-
-
 
 
 NUM_FRAMES = 16
@@ -248,11 +193,6 @@ ECHOJEPA_STD = torch.tensor(
 USE_ACTIVATION_CHECKPOINTING = True
 
 
-
-
-
-
-
 STAGE_A_HEAD_LR = 1e-4
 
 
@@ -262,10 +202,6 @@ STAGE_B_HEAD_LR = 1e-4
 WEIGHT_DECAY = 1e-3
 
 UNFREEZE_LAST_N_BLOCKS = 2
-
-
-
-
 
 
 AUG_BRIGHTNESS_PROB = 0.80
@@ -288,14 +224,6 @@ AUG_GAMMA_RANGE = (
 
 AUG_TRANSLATE_PROB = 0.50
 AUG_MAX_TRANSLATE = 8
-
-
-
-
-
-
-
-
 
 
 def set_seed(seed):
@@ -322,10 +250,6 @@ def set_seed(seed):
 set_seed(
     SEED
 )
-
-
-
-
 
 
 for path, description in [
@@ -409,15 +333,6 @@ print(
 print(
     "=" * 80
 )
-
-
-
-
-
-
-
-
-
 
 
 label_df = pd.read_csv(
@@ -677,10 +592,6 @@ print(
 )
 
 
-
-
-
-
 def load_video_tchw(
     npy_path,
 ):
@@ -843,13 +754,6 @@ def to_grayscale_01(
     return x.float()
 
 
-
-
-
-
-
-
-
 def uniform_sample_video(
     video,
     num_frames=NUM_FRAMES,
@@ -893,10 +797,6 @@ def uniform_sample_video(
     ]
 
     return sampled
-
-
-
-
 
 
 def random_translate(
@@ -1049,10 +949,6 @@ def augment_video(
     return video
 
 
-
-
-
-
 def prepare_echojepa_input(
     npy_path,
     train,
@@ -1121,10 +1017,6 @@ def prepare_echojepa_input(
         2,
         3,
     ).contiguous()
-
-
-
-
 
 
 class EchoJEPABaselineDataset(
@@ -1240,10 +1132,6 @@ eval_loader = DataLoader(
 )
 
 
-
-
-
-
 def _choose_encoder_state_dict(
     checkpoint,
 ):
@@ -1334,10 +1222,6 @@ def _clean_echojepa_key(
                 changed = True
 
     return key
-
-
-
-
 
 
 def load_echojepa_vitl(
@@ -1496,10 +1380,6 @@ def load_echojepa_vitl(
     return encoder
 
 
-
-
-
-
 class EchoJEPABaselineClassifier(
     nn.Module
 ):
@@ -1512,9 +1392,6 @@ class EchoJEPABaselineClassifier(
         super().__init__()
 
         self.backbone = backbone
-
-
-
 
 
         self.classifier = nn.Sequential(
@@ -1600,10 +1477,6 @@ model = EchoJEPABaselineClassifier(
 )
 
 
-
-
-
-
 def freeze_backbone(
     model,
 ):
@@ -1650,10 +1523,6 @@ def unfreeze_last_blocks(
         parameter.requires_grad = True
 
 
-
-
-
-
 n_negative = int(
     (
         train_df[
@@ -1692,10 +1561,6 @@ print(
     "\nPositive class weight:",
     POS_WEIGHT,
 )
-
-
-
-
 
 
 def make_stage_a_optimizer(
@@ -1784,10 +1649,6 @@ def make_stage_b_optimizer(
         optimizer,
         scheduler,
     )
-
-
-
-
 
 
 def calculate_metrics(
@@ -1898,10 +1759,6 @@ def calculate_metrics(
                 tp
             ),
     }
-
-
-
-
 
 
 def train_one_epoch(
@@ -2041,10 +1898,6 @@ def train_one_epoch(
     )
 
 
-
-
-
-
 @torch.no_grad()
 def evaluate(
     model,
@@ -2134,18 +1987,10 @@ def evaluate(
     )
 
 
-
-
-
-
 scaler = torch.amp.GradScaler(
     DEVICE_TYPE,
     enabled=AMP_ENABLED,
 )
-
-
-
-
 
 
 history = []
@@ -2301,17 +2146,10 @@ else:
     )
 
 
-
-
-
-
 for epoch in range(
     start_epoch,
     TOTAL_EPOCHS + 1,
 ):
-
-
-
 
 
     if epoch == (
@@ -2462,7 +2300,6 @@ for epoch in range(
     )
 
 
-
     pred_df.to_csv(
         TRAIN_PREDICTIONS_PATH,
         index=False,
@@ -2518,10 +2355,6 @@ for epoch in range(
     )
 
 
-
-
-
-
 final_metrics, final_predictions = evaluate(
     model,
     eval_loader,
@@ -2533,10 +2366,6 @@ final_predictions.to_csv(
     index=False,
     encoding="utf-8-sig",
 )
-
-
-
-
 
 
 torch.save(
@@ -2570,10 +2399,6 @@ torch.save(
     },
     FINAL_MODEL_PATH,
 )
-
-
-
-
 
 
 fpr, tpr, _ = roc_curve(
@@ -2638,10 +2463,6 @@ plt.savefig(
 )
 
 plt.close()
-
-
-
-
 
 
 history_df = pd.DataFrame(
@@ -2729,10 +2550,6 @@ if not history_df.empty:
     )
 
     plt.close()
-
-
-
-
 
 
 print(
