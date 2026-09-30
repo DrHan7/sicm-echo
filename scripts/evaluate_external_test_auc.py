@@ -53,10 +53,10 @@ THRESHOLD = 0.5
 BOOTSTRAP_ITERATIONS = 2000
 BOOTSTRAP_SEED = 42
 
-# Figure 4 calibration settings used for the reported analysis.
+
 CALIBRATION_BINS = 10
 
-# Figure 4 DCA settings used for the reported analysis.
+
 DCA_THRESHOLD_MIN = 0.05
 DCA_THRESHOLD_MAX = 0.60
 DCA_POINTS = 200
@@ -460,8 +460,8 @@ baseline_predictions = load_predictions(
     "baseline_probability",
 )
 
-# Full-model primary external cohort:
-# used for primary AUROC, threshold metrics, Brier, and calibration.
+
+
 full_external, full_metrics = evaluate_full_model(
     primary_labels,
     full_predictions,
@@ -476,8 +476,8 @@ full_external.to_csv(
 full_y = full_external["label"].to_numpy(dtype=int)
 full_prob = full_external["full_probability"].to_numpy(dtype=float)
 
-# Paired external cohort:
-# used for full-vs-baseline ROC, paired DeLong, and DCA.
+
+
 paired_external = (
     primary_labels
     .merge(full_predictions, on="id", how="inner")
@@ -536,7 +536,7 @@ pd.DataFrame(
     encoding="utf-8-sig",
 )
 
-# Calibration: 10 quantile bins with pointwise Wilson 95% CIs.
+
 (
     calibration_pred,
     calibration_obs,
@@ -623,7 +623,7 @@ fig.savefig(EVALUATION_DIR / "external_calibration_curve.png", dpi=600)
 fig.savefig(EVALUATION_DIR / "external_calibration_curve.pdf")
 plt.close(fig)
 
-# Decision curve analysis: exact Figure 4 range/grid.
+
 thresholds = np.linspace(
     DCA_THRESHOLD_MIN,
     DCA_THRESHOLD_MAX,
@@ -676,7 +676,7 @@ fig.savefig(EVALUATION_DIR / "external_decision_curve.png", dpi=600)
 fig.savefig(EVALUATION_DIR / "external_decision_curve.pdf")
 plt.close(fig)
 
-# Paired ROC figure.
+
 full_fpr, full_tpr, _ = roc_curve(paired_y, paired_full_prob)
 baseline_fpr, baseline_tpr, _ = roc_curve(paired_y, paired_baseline_prob)
 
@@ -703,8 +703,8 @@ fig.savefig(EVALUATION_DIR / "external_roc_comparison.png", dpi=600)
 fig.savefig(EVALUATION_DIR / "external_roc_comparison.pdf")
 plt.close(fig)
 
-# Sensitivity analyses use the same locked full-model probabilities;
-# only the precomputed reference-label CSV changes.
+
+
 sensitivity_020, metrics_020 = evaluate_full_model(
     labels_020,
     full_predictions,
