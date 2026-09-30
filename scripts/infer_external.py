@@ -1,33 +1,3 @@
-"""
-External test inference for the trained full physiology-informed SICM model.
-
-Pipeline
---------
-Raw echocardiographic NPY
-    -> EchoNet-Dynamic DeepLabV3-ResNet50 LV segmentation
-    -> LV area-time curve
-    -> ED / ES detection
-    -> all adjacent ED-to-ED cardiac cycles
-    -> 16-frame, 224 x 224 resampling
-    -> EchoJEPA ViT-L
-    -> phase-aware spatial attention
-    -> phase-aware temporal attention
-    -> LV-area physiological representation
-    -> multi-cycle MIL
-    -> one SICM probability per ID
-
-Important
----------
-- This file supports only the final locked physiology-informed architecture
-  saved by scripts/train.py. Historical model variants are intentionally not
-  supported.
-- No label file is read.
-- No AUC/accuracy is calculated.
-- No random augmentation is applied.
-- No self-supervised adaptation or fine-tuning is performed.
-- LV-segmentation normalization is loaded from the TRAINING outcome folder.
-- Physiology normalization is stored inside the trained final_model.pt.
-"""
 
 
 import gc
@@ -47,10 +17,6 @@ import torchvision
 from scipy.signal import find_peaks
 from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
-
-
-
-
 
 
 def required_env_path(name):
@@ -87,10 +53,6 @@ OUTPUT_CSV = Path(
 OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
 
 
-
-
-
-
 DEVICE = torch.device(
     "cuda"
     if torch.cuda.is_available()
@@ -107,12 +69,6 @@ AMP_ENABLED = (
 )
 
 
-
-
-
-
-
-
 SEG_SIZE = 112
 SEG_BATCH_SIZE = 64
 
@@ -126,10 +82,6 @@ MAX_CYCLE_FRAMES = 90
 
 QC_MIN_AREA_EXCURSION_FRACTION = 0.06
 QC_MAX_ED_AREA_MISMATCH_FRACTION = 0.60
-
-
-
-
 
 
 NUM_FRAMES = 16
@@ -185,10 +137,6 @@ ECHOJEPA_STD = torch.tensor(
     ],
     dtype=torch.float32,
 )
-
-
-
-
 
 
 for path, description in [
@@ -271,10 +219,6 @@ print(
 )
 
 
-
-
-
-
 normalization_df = pd.read_csv(
     SEGMENTATION_NORMALIZATION_CSV
 )
@@ -327,11 +271,6 @@ print(
     "Training LV-segmentation std :",
     DATA_STD.tolist(),
 )
-
-
-
-
-
 
 
 def load_video_tchw(npy_path):
@@ -648,12 +587,6 @@ def detect_all_cycles(
     raw_area,
 ):
 
-    """
-    Return all adjacent ED-to-ED cycles found by primary ED-peak detection.
-
-    If fewer than two ED peaks are detected, raise an error. No alternate
-    detector or synthetic fallback interval is used.
-    """
 
     raw_area = np.asarray(
         raw_area,
@@ -721,24 +654,12 @@ def detect_all_cycles(
     }
 
 
-
-
-
-
 def resample_cycle(
     original_video,
     ed1,
     ed2,
 ):
 
-    """
-    Crop ED1..ED2 and resample to:
-
-        NUM_FRAMES x IMAGE_SIZE x IMAGE_SIZE
-
-    Output:
-        uint8 T,H,W
-    """
 
     ed1 = int(
         ed1
@@ -829,24 +750,6 @@ def build_lv_area_representation(
     ed2,
 ):
 
-    """
-    Create a fixed-length normalized LV-area curve plus explicit
-    physiological descriptors.
-
-    The curve is divided by the mean ED area, so ED is approximately 1.
-    This emphasizes relative contraction / filling rather than image zoom.
-
-    Explicit descriptors:
-        0. fractional area change
-        1. normalized systolic contraction slope
-        2. normalized diastolic filling slope
-        3. cycle-length proxy
-        4. relative ED endpoint mismatch
-
-    The cycle-length value is frame-based because the current NPY files do not
-    provide a per-study frame rate. If true FPS becomes available, replace this
-    proxy with duration in seconds.
-    """
 
     ed1 = int(
         ed1
@@ -1054,22 +957,6 @@ def tokens_to_spatial_grid(
     tokens,
 ):
 
-    """
-    Convert the EchoJEPA token sequence:
-
-        B, 1568, 1024
-
-    to:
-
-        B, 8, 196, 1024
-
-    where:
-
-        8   = temporal tubelet positions
-        196 = 14 x 14 spatial tokens
-
-    No spatial averaging is performed here.
-    """
 
     batch_size = (
         tokens.shape[0]
@@ -1096,21 +983,10 @@ def tokens_to_spatial_grid(
     return tokens
 
 
-
-
-
-
 def prepare_echojepa_cycle(
     cycle_array,
 ):
 
-    """
-    cycle_array:
-        uint8, shape T,H,W
-
-    return:
-        float32, shape C,T,H,W
-    """
 
     cycle = (
         torch.from_numpy(
@@ -1154,15 +1030,6 @@ def prepare_echojepa_cycle(
         2,
         3,
     ).contiguous()
-
-
-
-
-
-
-
-
-
 
 
 def build_echojepa_vitl():
@@ -1213,10 +1080,6 @@ def build_echojepa_vitl():
         )
 
     return encoder
-
-
-
-
 
 
 class SpatialAttentionPool(
@@ -1292,10 +1155,6 @@ class SpatialAttentionPool(
                 -1
             ),
         )
-
-
-
-
 
 
 class TemporalAttentionPool(
@@ -1423,10 +1282,6 @@ class TemporalAttentionPool(
         )
 
 
-
-
-
-
 class LVAreaEncoder(
     nn.Module
 ):
@@ -1436,8 +1291,6 @@ class LVAreaEncoder(
     ):
 
         super().__init__()
-
-
 
 
         self.register_buffer(
@@ -1455,7 +1308,6 @@ class LVAreaEncoder(
                 dtype=torch.float32,
             )
         )
-
 
 
         self.curve_encoder = nn.Sequential(
@@ -1528,10 +1380,6 @@ class LVAreaEncoder(
         )
 
 
-
-
-
-
 class CycleMILAttention(
     nn.Module
 ):
@@ -1589,10 +1437,6 @@ class CycleMILAttention(
             study_feature,
             weights,
         )
-
-
-
-
 
 
 class SICMInferenceModel(
@@ -1752,10 +1596,6 @@ class SICMInferenceModel(
             study_logit,
             cycle_attention,
         )
-
-
-
-
 
 
 def load_trained_model(
@@ -1943,7 +1783,6 @@ def load_trained_model(
     )
 
 
-
     model.load_state_dict(
         state_dict,
         strict=True,
@@ -1964,10 +1803,6 @@ def load_trained_model(
     )
 
     return model
-
-
-
-
 
 
 def prepare_study(
@@ -2074,13 +1909,6 @@ def prepare_study(
     )
 
 
-
-
-
-
-
-
-
 npy_paths = sorted(
     [
         path
@@ -2112,10 +1940,6 @@ print(
 )
 
 
-
-
-
-
 lv_segmenter = build_lv_segmenter(
     LV_SEGMENTATION_CHECKPOINT
 )
@@ -2124,10 +1948,6 @@ lv_segmenter = build_lv_segmenter(
 model = load_trained_model(
     MODEL_PATH
 )
-
-
-
-
 
 
 records = []
@@ -2289,10 +2109,6 @@ for npy_path in tqdm(
                     ),
             }
         )
-
-
-
-
 
 
 result_df = pd.DataFrame(
