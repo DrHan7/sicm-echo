@@ -1,3 +1,4 @@
+import math
 import os
 from pathlib import Path
 
@@ -7,12 +8,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from scipy.stats import norm
 from sklearn.metrics import (
     accuracy_score,
     brier_score_loss,
     confusion_matrix,
     f1_score,
+    recall_score,
     roc_auc_score,
     roc_curve,
 )
@@ -25,12 +26,12 @@ def required_env_path(name):
     return Path(value).expanduser()
 
 
-def optional_env_path(name):
-    value = os.environ.get(name)
-    return Path(value).expanduser() if value else None
+PRIMARY_LABEL_CSV = required_env_path("SICM_EXTERNAL_LABELS_CSV")
+LABEL_020_CSV = required_env_path("SICM_EXTERNAL_LABELS_020_CSV")
+LABEL_GRAY_EXCLUDED_CSV = required_env_path(
+    "SICM_EXTERNAL_LABELS_GRAY_EXCLUDED_CSV"
+)
 
-
-LABEL_CSV = required_env_path("SICM_EXTERNAL_LABELS_CSV")
 FULL_PRED_CSV = Path(
     os.environ.get(
         "SICM_EXTERNAL_FULL_PREDICTIONS_CSV",
@@ -48,31 +49,17 @@ EVALUATION_DIR = Path(
 ).expanduser()
 EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
 
-CTNT_CSV = optional_env_path("SICM_EXTERNAL_CTNT_CSV")
-LABEL_020_CSV = optional_env_path("SICM_EXTERNAL_LABELS_020_CSV")
-LABEL_GRAY_EXCLUDED_CSV = optional_env_path(
-    "SICM_EXTERNAL_LABELS_GRAY_EXCLUDED_CSV"
-)
-CTNT_VALUE_COLUMN = os.environ.get("SICM_CTNT_VALUE_COLUMN", "ctnt_ng_ml")
-CTNT_ID_COLUMN = os.environ.get("SICM_CTNT_ID_COLUMN", "id")
-
 THRESHOLD = 0.5
-BOOTSTRAP_ITERATIONS = int(os.environ.get("SICM_BOOTSTRAP_ITERATIONS", "2000"))
-BOOTSTRAP_SEED = int(os.environ.get("SICM_BOOTSTRAP_SEED", "42"))
-CALIBRATION_BINS = int(os.environ.get("SICM_CALIBRATION_BINS", "10"))
-CALIBRATION_STRATEGY = os.environ.get(
-    "SICM_CALIBRATION_STRATEGY", "quantile"
-).strip().lower()
-DCA_MIN_THRESHOLD = float(os.environ.get("SICM_DCA_MIN_THRESHOLD", "0.01"))
-DCA_MAX_THRESHOLD = float(os.environ.get("SICM_DCA_MAX_THRESHOLD", "0.99"))
-DCA_STEP = float(os.environ.get("SICM_DCA_STEP", "0.01"))
+BOOTSTRAP_ITERATIONS = 2000
+BOOTSTRAP_SEED = 42
 
-if CALIBRATION_STRATEGY not in {"uniform", "quantile"}:
-    raise RuntimeError("SICM_CALIBRATION_STRATEGY must be 'uniform' or 'quantile'.")
-if not (0 < DCA_MIN_THRESHOLD < DCA_MAX_THRESHOLD < 1):
-    raise RuntimeError("DCA thresholds must satisfy 0 < min < max < 1.")
-if DCA_STEP <= 0:
-    raise RuntimeError("SICM_DCA_STEP must be positive.")
+# Figure 4 calibration settings used for the reported analysis.
+CALIBRATION_BINS = 10
+
+# Figure 4 DCA settings used for the reported analysis.
+DCA_THRESHOLD_MIN = 0.05
+DCA_THRESHOLD_MAX = 0.60
+DCA_POINTS = 200
 
 
 def load_labels(path):
@@ -105,22 +92,31 @@ def load_labels(path):
 
 def load_predictions(path, probability_name):
     df = pd.read_csv(path, dtype={"id": str}, encoding="utf-8-sig")
-    required = {"id", "sicm_probability"}
-    missing = required - set(df.columns)
-    if missing:
-        raise RuntimeError(f"{path.name} is missing columns: {sorted(missing)}")
+    if "id" not in df.columns:
+        raise RuntimeError(f"{path.name} is missing column: id")
+
+    if "sicm_probability" in df.columns:
+        probability_column = "sicm_probability"
+    elif "probability" in df.columns:
+        probability_column = "probability"
+    else:
+        raise RuntimeError(
+            f"{path.name} must contain sicm_probability or probability."
+        )
 
     out = df.copy()
     out["id"] = out["id"].astype(str).str.strip()
+
     if "status" in out.columns:
         out = out[out["status"].astype(str).str.lower() == "success"].copy()
 
-    out["sicm_probability"] = pd.to_numeric(
-        out["sicm_probability"], errors="coerce"
+    out[probability_name] = pd.to_numeric(
+        out[probability_column],
+        errors="coerce",
     )
-    out = out.dropna(subset=["id", "sicm_probability"]).copy()
+    out = out.dropna(subset=["id", probability_name]).copy()
 
-    if not out["sicm_probability"].between(0, 1, inclusive="both").all():
+    if not out[probability_name].between(0, 1, inclusive="both").all():
         raise RuntimeError(f"{path.name} contains probabilities outside [0, 1].")
 
     if out["id"].duplicated().any():
@@ -129,49 +125,301 @@ def load_predictions(path, probability_name):
             f"{path.name} contains duplicated successful prediction IDs: {ids[:20]}"
         )
 
-    return out[["id", "sicm_probability"]].rename(
-        columns={"sicm_probability": probability_name}
-    )
+    return out[["id", probability_name]]
 
 
-def bootstrap_auc_ci(labels, probabilities):
-    y = np.asarray(labels, dtype=np.int64)
-    p = np.asarray(probabilities, dtype=np.float64)
+def bootstrap_auc_ci(y_true, y_prob):
+    y_true = np.asarray(y_true, dtype=int)
+    y_prob = np.asarray(y_prob, dtype=float)
     rng = np.random.default_rng(BOOTSTRAP_SEED)
-    aucs = []
+    auc_values = []
+    n = len(y_true)
 
     for _ in range(BOOTSTRAP_ITERATIONS):
-        idx = rng.integers(0, len(y), size=len(y))
-        if np.unique(y[idx]).size < 2:
+        index = rng.integers(0, n, size=n)
+        y_sample = y_true[index]
+        p_sample = y_prob[index]
+        if np.unique(y_sample).size < 2:
             continue
-        aucs.append(roc_auc_score(y[idx], p[idx]))
+        auc_values.append(roc_auc_score(y_sample, p_sample))
 
-    if not aucs:
+    if not auc_values:
         return np.nan, np.nan
 
     return (
-        float(np.percentile(aucs, 2.5)),
-        float(np.percentile(aucs, 97.5)),
+        float(np.percentile(auc_values, 2.5)),
+        float(np.percentile(auc_values, 97.5)),
     )
 
 
-def classification_metrics(labels, probabilities, model_name, analysis_name):
-    y = np.asarray(labels, dtype=np.int64)
-    p = np.asarray(probabilities, dtype=np.float64)
+def compute_midrank(x):
+    x = np.asarray(x)
+    order = np.argsort(x)
+    sorted_x = x[order]
+    n = len(x)
+    ranks = np.zeros(n, dtype=float)
 
-    if np.unique(y).size != 2:
-        raise RuntimeError(
-            f"{analysis_name}/{model_name}: both classes are required for AUROC."
+    i = 0
+    while i < n:
+        j = i
+        while j < n and sorted_x[j] == sorted_x[i]:
+            j += 1
+        ranks[i:j] = 0.5 * (i + j - 1) + 1
+        i = j
+
+    result = np.empty(n, dtype=float)
+    result[order] = ranks
+    return result
+
+
+def fast_delong(predictions_sorted_transposed, positive_count):
+    m = int(positive_count)
+    n = predictions_sorted_transposed.shape[1] - m
+    k = predictions_sorted_transposed.shape[0]
+
+    positive_examples = predictions_sorted_transposed[:, :m]
+    negative_examples = predictions_sorted_transposed[:, m:]
+
+    tx = np.empty((k, m))
+    ty = np.empty((k, n))
+    tz = np.empty((k, m + n))
+
+    for r in range(k):
+        tx[r, :] = compute_midrank(positive_examples[r, :])
+        ty[r, :] = compute_midrank(negative_examples[r, :])
+        tz[r, :] = compute_midrank(predictions_sorted_transposed[r, :])
+
+    aucs = tz[:, :m].sum(axis=1) / m / n - (m + 1) / 2.0 / n
+    v01 = (tz[:, :m] - tx) / n
+    v10 = 1.0 - (tz[:, m:] - ty) / m
+
+    sx = np.cov(v01)
+    sy = np.cov(v10)
+    covariance = sx / m + sy / n
+    return aucs, covariance
+
+
+def paired_delong_test(y_true, probability_1, probability_2):
+    y_true = np.asarray(y_true, dtype=int)
+    probability_1 = np.asarray(probability_1, dtype=float)
+    probability_2 = np.asarray(probability_2, dtype=float)
+
+    if not (
+        len(y_true) == len(probability_1) == len(probability_2)
+    ):
+        raise ValueError(
+            "DeLong requires paired predictions from identical patients."
         )
 
-    pred = (p >= THRESHOLD).astype(np.int64)
+    positive_count = int(np.sum(y_true == 1))
+    negative_count = int(np.sum(y_true == 0))
+    if positive_count == 0 or negative_count == 0:
+        raise RuntimeError("DeLong requires both classes.")
+
+    order = np.argsort(-y_true)
+    predictions = np.vstack([probability_1, probability_2])[:, order]
+    aucs, covariance = fast_delong(predictions, positive_count)
+
+    delta_auc = aucs[0] - aucs[1]
+    variance_delta = (
+        covariance[0, 0]
+        + covariance[1, 1]
+        - 2 * covariance[0, 1]
+    )
+    variance_delta = max(float(variance_delta), 0.0)
+    se_delta = math.sqrt(variance_delta)
+
+    if se_delta == 0:
+        p_value = 1.0 if delta_auc == 0 else 0.0
+        delta_ci_lower = delta_auc
+        delta_ci_upper = delta_auc
+    else:
+        z_value = abs(delta_auc) / se_delta
+        p_value = math.erfc(z_value / math.sqrt(2.0))
+        delta_ci_lower = delta_auc - 1.96 * se_delta
+        delta_ci_upper = delta_auc + 1.96 * se_delta
+
+    return {
+        "auc_full": float(aucs[0]),
+        "auc_baseline": float(aucs[1]),
+        "delta_auc": float(delta_auc),
+        "delta_ci_lower": float(delta_ci_lower),
+        "delta_ci_upper": float(delta_ci_upper),
+        "p_value": float(p_value),
+    }
+
+
+def wilson_interval(successes, total, z=1.96):
+    if total == 0:
+        return np.nan, np.nan
+
+    proportion = successes / total
+    denominator = 1.0 + z ** 2 / total
+    centre = (
+        proportion + z ** 2 / (2.0 * total)
+    ) / denominator
+    half_width = (
+        z
+        * np.sqrt(
+            proportion * (1.0 - proportion) / total
+            + z ** 2 / (4.0 * total ** 2)
+        )
+        / denominator
+    )
+
+    return (
+        max(0.0, centre - half_width),
+        min(1.0, centre + half_width),
+    )
+
+
+def calibration_with_ci(y_true, y_prob, n_bins=10):
+    y_true = np.asarray(y_true, dtype=int)
+    y_prob = np.asarray(y_prob, dtype=float)
+
+    quantiles = np.linspace(0.0, 1.0, n_bins + 1)
+    edges = np.unique(np.quantile(y_prob, quantiles))
+    if len(edges) < 2:
+        raise RuntimeError("Calibration probabilities do not define usable bins.")
+
+    bin_index = np.digitize(
+        y_prob,
+        edges[1:-1],
+        right=True,
+    )
+
+    mean_pred = []
+    observed = []
+    lower_ci = []
+    upper_ci = []
+    bin_n = []
+
+    for i in range(len(edges) - 1):
+        mask = bin_index == i
+        n = int(mask.sum())
+        if n == 0:
+            continue
+
+        mean_probability = float(np.mean(y_prob[mask]))
+        successes = int(np.sum(y_true[mask]))
+        observed_rate = successes / n
+        low, high = wilson_interval(successes, n)
+
+        mean_pred.append(mean_probability)
+        observed.append(observed_rate)
+        lower_ci.append(low)
+        upper_ci.append(high)
+        bin_n.append(n)
+
+    return (
+        np.asarray(mean_pred),
+        np.asarray(observed),
+        np.asarray(lower_ci),
+        np.asarray(upper_ci),
+        np.asarray(bin_n),
+    )
+
+
+def calibration_intercept_slope(
+    y_true,
+    y_prob,
+    max_iter=100,
+    tolerance=1e-9,
+):
+    y_true = np.asarray(y_true, dtype=float)
+    y_prob = np.asarray(y_prob, dtype=float)
+
+    eps = 1e-6
+    y_prob = np.clip(y_prob, eps, 1.0 - eps)
+    logit_probability = np.log(y_prob / (1.0 - y_prob))
+    X = np.column_stack(
+        [
+            np.ones_like(logit_probability),
+            logit_probability,
+        ]
+    )
+
+    beta = np.array([0.0, 1.0], dtype=float)
+
+    for _ in range(max_iter):
+        eta = np.clip(X @ beta, -30, 30)
+        predicted = 1.0 / (1.0 + np.exp(-eta))
+        weights = predicted * (1.0 - predicted)
+        gradient = X.T @ (y_true - predicted)
+        information = X.T @ (X * weights[:, None])
+
+        try:
+            step = np.linalg.solve(information, gradient)
+        except np.linalg.LinAlgError:
+            step = np.linalg.pinv(information) @ gradient
+
+        beta_new = beta + step
+        if np.max(np.abs(beta_new - beta)) < tolerance:
+            beta = beta_new
+            break
+        beta = beta_new
+
+    eta = np.clip(X @ beta, -30, 30)
+    predicted = 1.0 / (1.0 + np.exp(-eta))
+    weights = predicted * (1.0 - predicted)
+    information = X.T @ (X * weights[:, None])
+    covariance = np.linalg.pinv(information)
+    standard_errors = np.sqrt(np.diag(covariance))
+
+    intercept = float(beta[0])
+    slope = float(beta[1])
+    intercept_se = float(standard_errors[0])
+    slope_se = float(standard_errors[1])
+
+    return {
+        "intercept": intercept,
+        "intercept_ci_lower": intercept - 1.96 * intercept_se,
+        "intercept_ci_upper": intercept + 1.96 * intercept_se,
+        "slope": slope,
+        "slope_ci_lower": slope - 1.96 * slope_se,
+        "slope_ci_upper": slope + 1.96 * slope_se,
+    }
+
+
+def calculate_net_benefit(y_true, probabilities, thresholds):
+    y_true = np.asarray(y_true, dtype=int)
+    probabilities = np.asarray(probabilities, dtype=float)
+    n = len(y_true)
+    net_benefit = []
+
+    for threshold in thresholds:
+        predicted_positive = probabilities >= threshold
+        tp = int(np.sum(predicted_positive & (y_true == 1)))
+        fp = int(np.sum(predicted_positive & (y_true == 0)))
+        odds = threshold / (1.0 - threshold)
+        net_benefit.append(tp / n - fp / n * odds)
+
+    return np.asarray(net_benefit, dtype=float)
+
+
+def evaluate_full_model(label_df, full_pred_df, analysis_name):
+    merged = (
+        label_df
+        .merge(full_pred_df, on="id", how="inner")
+        .sort_values("id")
+        .reset_index(drop=True)
+    )
+    if merged.empty:
+        raise RuntimeError(f"{analysis_name}: no prediction IDs matched labels.")
+
+    y = merged["label"].to_numpy(dtype=int)
+    p = merged["full_probability"].to_numpy(dtype=float)
+    if np.unique(y).size != 2:
+        raise RuntimeError(f"{analysis_name}: both classes are required.")
+
+    pred = (p >= THRESHOLD).astype(int)
     tn, fp, fn, tp = confusion_matrix(y, pred, labels=[0, 1]).ravel()
     auc = float(roc_auc_score(y, p))
     ci_low, ci_high = bootstrap_auc_ci(y, p)
 
-    return {
+    metrics = {
         "analysis": analysis_name,
-        "model": model_name,
+        "model": "Physiology-informed model",
         "n": int(len(y)),
         "n_SICM": int((y == 1).sum()),
         "n_sepsis_only": int((y == 0).sum()),
@@ -179,7 +427,7 @@ def classification_metrics(labels, probabilities, model_name, analysis_name):
         "auc_95ci_lower": ci_low,
         "auc_95ci_upper": ci_high,
         "accuracy": float(accuracy_score(y, pred)),
-        "sensitivity": float(tp / max(tp + fn, 1)),
+        "sensitivity": float(recall_score(y, pred, zero_division=0)),
         "specificity": float(tn / max(tn + fp, 1)),
         "f1": float(f1_score(y, pred, zero_division=0)),
         "brier": float(brier_score_loss(y, p)),
@@ -190,573 +438,324 @@ def classification_metrics(labels, probabilities, model_name, analysis_name):
         "fn": int(fn),
     }
 
-
-def make_primary_paired_dataset(label_df, full_df, baseline_df):
-    label_ids = set(label_df["id"])
-    full_ids = set(full_df["id"]) & label_ids
-    baseline_ids = set(baseline_df["id"]) & label_ids
-
-    missing_full = sorted(label_ids - full_ids)
-    missing_baseline = sorted(label_ids - baseline_ids)
-    if missing_full or missing_baseline:
-        raise RuntimeError(
-            "Every primary external-analysis ID must have a successful prediction "
-            "from both models.\n"
-            f"Missing full-model predictions ({len(missing_full)}): {missing_full[:20]}\n"
-            f"Missing baseline predictions ({len(missing_baseline)}): {missing_baseline[:20]}"
-        )
-
-    if full_ids != baseline_ids:
-        only_full = sorted(full_ids - baseline_ids)
-        only_baseline = sorted(baseline_ids - full_ids)
-        raise RuntimeError(
-            "The physiology-informed model and EchoJEPA baseline do not have "
-            "successful predictions for the same labeled IDs. Paired DeLong "
-            "comparison requires an identical cohort.\n"
-            f"Only full model ({len(only_full)}): {only_full[:20]}\n"
-            f"Only baseline ({len(only_baseline)}): {only_baseline[:20]}"
-        )
-
-    paired = (
-        label_df[label_df["id"].isin(full_ids)]
-        .merge(full_df, on="id", how="inner")
-        .merge(baseline_df, on="id", how="inner")
-        .sort_values("id")
-        .reset_index(drop=True)
-    )
-
-    if len(paired) != len(full_ids):
-        raise RuntimeError("Paired external cohort construction failed.")
-
-    if paired["label"].nunique() != 2:
-        raise RuntimeError("Both classes are required in the paired external cohort.")
-
-    return paired
-
-
-def delong_placement_values(labels, predictions):
-    y = np.asarray(labels, dtype=np.int64)
-    preds = np.asarray(predictions, dtype=np.float64)
-
-    if preds.ndim == 1:
-        preds = preds[None, :]
-    if preds.shape[1] != len(y):
-        raise ValueError("Prediction matrix does not match label length.")
-
-    positive = preds[:, y == 1]
-    negative = preds[:, y == 0]
-    m = positive.shape[1]
-    n = negative.shape[1]
-
-    if m < 2 or n < 2:
-        raise RuntimeError("Paired DeLong test requires at least two cases per class.")
-
-    v10 = np.empty((preds.shape[0], m), dtype=np.float64)
-    v01 = np.empty((preds.shape[0], n), dtype=np.float64)
-
-    for k in range(preds.shape[0]):
-        pos = positive[k]
-        neg = negative[k]
-        comparison = (
-            (pos[:, None] > neg[None, :]).astype(np.float64)
-            + 0.5 * (pos[:, None] == neg[None, :]).astype(np.float64)
-        )
-        v10[k] = comparison.mean(axis=1)
-        v01[k] = comparison.mean(axis=0)
-
-    aucs = v10.mean(axis=1)
-    sx = np.cov(v10, bias=False)
-    sy = np.cov(v01, bias=False)
-
-    if preds.shape[0] == 1:
-        sx = np.asarray([[float(sx)]])
-        sy = np.asarray([[float(sy)]])
-
-    covariance = sx / m + sy / n
-    return aucs, covariance
-
-
-def paired_delong_test(labels, full_prob, baseline_prob):
-    predictions = np.vstack(
-        [
-            np.asarray(full_prob, dtype=np.float64),
-            np.asarray(baseline_prob, dtype=np.float64),
-        ]
-    )
-    aucs, covariance = delong_placement_values(labels, predictions)
-
-    difference = float(aucs[0] - aucs[1])
-    variance = float(
-        covariance[0, 0] + covariance[1, 1] - 2 * covariance[0, 1]
-    )
-    variance = max(variance, 0.0)
-    se = float(np.sqrt(variance))
-
-    if se == 0:
-        z = np.inf if difference != 0 else 0.0
-        p_value = 0.0 if difference != 0 else 1.0
-        ci_low = difference
-        ci_high = difference
-    else:
-        z = difference / se
-        p_value = float(2 * norm.sf(abs(z)))
-        critical = float(norm.ppf(0.975))
-        ci_low = difference - critical * se
-        ci_high = difference + critical * se
-
-    return {
-        "full_model_auc": float(aucs[0]),
-        "baseline_auc": float(aucs[1]),
-        "auc_difference_full_minus_baseline": difference,
-        "difference_95ci_lower": float(ci_low),
-        "difference_95ci_upper": float(ci_high),
-        "standard_error": se,
-        "z": float(z),
-        "p_value_two_sided": p_value,
-        "n": int(len(labels)),
-    }
-
-
-def save_roc_plot(paired, full_metrics, baseline_metrics):
-    y = paired["label"].to_numpy(dtype=np.int64)
-    full_prob = paired["full_probability"].to_numpy(dtype=np.float64)
-    baseline_prob = paired["baseline_probability"].to_numpy(dtype=np.float64)
-
-    full_fpr, full_tpr, _ = roc_curve(y, full_prob)
-    baseline_fpr, baseline_tpr, _ = roc_curve(y, baseline_prob)
-
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.plot(
-        full_fpr,
-        full_tpr,
-        linewidth=1.5,
-        label=f"Physiology-informed model (AUC={full_metrics['auc']:.3f})",
-    )
-    ax.plot(
-        baseline_fpr,
-        baseline_tpr,
-        linewidth=1.5,
-        label=f"EchoJEPA baseline (AUC={baseline_metrics['auc']:.3f})",
-    )
-    ax.plot([0, 1], [0, 1], linestyle="--", linewidth=1)
-    ax.set_xlabel("False Positive Rate")
-    ax.set_ylabel("True Positive Rate")
-    ax.set_title("External validation ROC")
-    ax.legend(loc="lower right")
-    fig.tight_layout()
-    fig.savefig(EVALUATION_DIR / "external_roc_comparison.png", dpi=600)
-    fig.savefig(EVALUATION_DIR / "external_roc_comparison.pdf")
-    plt.close(fig)
-
-
-def calibration_table_with_pointwise_ci(labels, probabilities):
-    y = np.asarray(labels, dtype=np.int64)
-    p = np.asarray(probabilities, dtype=np.float64)
-
-    if CALIBRATION_STRATEGY == "quantile":
-        edges = np.quantile(
-            p,
-            np.linspace(0.0, 1.0, CALIBRATION_BINS + 1),
-        )
-        edges = np.unique(edges)
-        if len(edges) < 2:
-            raise RuntimeError("Calibration probabilities do not define usable bins.")
-    else:
-        edges = np.linspace(0.0, 1.0, CALIBRATION_BINS + 1)
-
-    interior = edges[1:-1]
-    bin_index = np.digitize(p, interior, right=True)
-    n_bins_actual = len(edges) - 1
-
-    rows = []
-    for b in range(n_bins_actual):
-        mask = bin_index == b
-        if not np.any(mask):
-            continue
-        rows.append(
-            {
-                "bin": b + 1,
-                "n": int(mask.sum()),
-                "mean_predicted_probability": float(p[mask].mean()),
-                "observed_event_fraction": float(y[mask].mean()),
-            }
-        )
-
-    table = pd.DataFrame(rows)
-    if table.empty:
-        raise RuntimeError("No calibration bins were populated.")
-
-    rng = np.random.default_rng(BOOTSTRAP_SEED)
-    bootstrap_values = {
-        int(row["bin"]): []
-        for _, row in table.iterrows()
-    }
-
-    for _ in range(BOOTSTRAP_ITERATIONS):
-        idx = rng.integers(0, len(y), size=len(y))
-        yb = y[idx]
-        pb = p[idx]
-        bb = np.digitize(pb, interior, right=True)
-
-        for b in range(n_bins_actual):
-            mask = bb == b
-            if np.any(mask) and (b + 1) in bootstrap_values:
-                bootstrap_values[b + 1].append(float(yb[mask].mean()))
-
-    lower = []
-    upper = []
-    for bin_number in table["bin"].astype(int):
-        values = bootstrap_values[bin_number]
-        if values:
-            lower.append(float(np.percentile(values, 2.5)))
-            upper.append(float(np.percentile(values, 97.5)))
-        else:
-            lower.append(np.nan)
-            upper.append(np.nan)
-
-    table["observed_fraction_95ci_lower"] = lower
-    table["observed_fraction_95ci_upper"] = upper
-    return table
-
-
-def save_calibration(paired):
-    y = paired["label"].to_numpy(dtype=np.int64)
-    p = paired["full_probability"].to_numpy(dtype=np.float64)
-
-    calibration_df = calibration_table_with_pointwise_ci(y, p)
-    calibration_df.to_csv(
-        EVALUATION_DIR / "external_calibration_curve.csv",
-        index=False,
-    )
-
-    x = calibration_df["mean_predicted_probability"].to_numpy(dtype=float)
-    observed = calibration_df["observed_event_fraction"].to_numpy(dtype=float)
-    lower = calibration_df["observed_fraction_95ci_lower"].to_numpy(dtype=float)
-    upper = calibration_df["observed_fraction_95ci_upper"].to_numpy(dtype=float)
-
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.plot([0, 1], [0, 1], linestyle="--", linewidth=1, label="Perfect calibration")
-    ax.fill_between(
-        x,
-        lower,
-        upper,
-        alpha=0.20,
-        label="Pointwise 95% CI",
-    )
-    ax.plot(
-        x,
-        observed,
-        marker="o",
-        linewidth=1.5,
-        label="Physiology-informed model",
-    )
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.set_xlabel("Mean predicted probability")
-    ax.set_ylabel("Observed event fraction")
-    ax.set_title("External calibration")
-    ax.legend(loc="best")
-    fig.tight_layout()
-    fig.savefig(EVALUATION_DIR / "external_calibration_curve.png", dpi=600)
-    fig.savefig(EVALUATION_DIR / "external_calibration_curve.pdf")
-    plt.close(fig)
-
-    return float(brier_score_loss(y, p))
-
-
-def decision_curve_table(labels, full_prob, baseline_prob):
-    y = np.asarray(labels, dtype=np.int64)
-    full = np.asarray(full_prob, dtype=np.float64)
-    baseline = np.asarray(baseline_prob, dtype=np.float64)
-
-    thresholds = np.arange(
-        DCA_MIN_THRESHOLD,
-        DCA_MAX_THRESHOLD + DCA_STEP / 2,
-        DCA_STEP,
-        dtype=np.float64,
-    )
-    thresholds = thresholds[(thresholds > 0) & (thresholds < 1)]
-    n = len(y)
-    prevalence = float(y.mean())
-
-    rows = []
-    for pt in thresholds:
-        weight = pt / (1.0 - pt)
-
-        def net_benefit(prob):
-            pred = prob >= pt
-            tp = int(np.sum(pred & (y == 1)))
-            fp = int(np.sum(pred & (y == 0)))
-            return tp / n - fp / n * weight
-
-        rows.append(
-            {
-                "threshold_probability": float(pt),
-                "physiology_informed_net_benefit": float(net_benefit(full)),
-                "echojepa_baseline_net_benefit": float(net_benefit(baseline)),
-                "treat_all_net_benefit": float(
-                    prevalence - (1.0 - prevalence) * weight
-                ),
-                "treat_none_net_benefit": 0.0,
-            }
-        )
-
-    return pd.DataFrame(rows)
-
-
-def save_decision_curve(paired):
-    dca = decision_curve_table(
-        paired["label"],
-        paired["full_probability"],
-        paired["baseline_probability"],
-    )
-    dca.to_csv(EVALUATION_DIR / "external_decision_curve.csv", index=False)
-
-    fig, ax = plt.subplots(figsize=(7, 6))
-    ax.plot(
-        dca["threshold_probability"],
-        dca["physiology_informed_net_benefit"],
-        label="Physiology-informed model",
-    )
-    ax.plot(
-        dca["threshold_probability"],
-        dca["echojepa_baseline_net_benefit"],
-        label="EchoJEPA baseline",
-    )
-    ax.plot(
-        dca["threshold_probability"],
-        dca["treat_all_net_benefit"],
-        linestyle="--",
-        label="Treat all",
-    )
-    ax.plot(
-        dca["threshold_probability"],
-        dca["treat_none_net_benefit"],
-        linestyle=":",
-        label="Treat none",
-    )
-    ax.set_xlabel("Threshold probability")
-    ax.set_ylabel("Net benefit")
-    ax.set_title("External decision curve analysis")
-    ax.legend(loc="best")
-    fig.tight_layout()
-    fig.savefig(EVALUATION_DIR / "external_decision_curve.png", dpi=600)
-    fig.savefig(EVALUATION_DIR / "external_decision_curve.pdf")
-    plt.close(fig)
-
-
-def load_ctnt_labels(path):
-    df = pd.read_csv(path, dtype={CTNT_ID_COLUMN: str}, encoding="utf-8-sig")
-    if CTNT_ID_COLUMN not in df.columns or CTNT_VALUE_COLUMN not in df.columns:
-        raise RuntimeError(
-            f"{path.name} must contain '{CTNT_ID_COLUMN}' and "
-            f"'{CTNT_VALUE_COLUMN}' columns."
-        )
-
-    x = df[[CTNT_ID_COLUMN, CTNT_VALUE_COLUMN]].copy()
-    x.columns = ["id", "ctnt_ng_ml"]
-    x["id"] = x["id"].astype(str).str.strip()
-    x["ctnt_ng_ml"] = pd.to_numeric(x["ctnt_ng_ml"], errors="coerce")
-    x = x.dropna(subset=["id", "ctnt_ng_ml"])
-    if x["id"].eq("").any():
-        raise RuntimeError(f"{path.name} contains an empty ID.")
-    if (x["ctnt_ng_ml"] < 0).any():
-        raise RuntimeError(f"{path.name} contains negative cTnT values.")
-
-    episode = (
-        x.groupby("id", as_index=False)["ctnt_ng_ml"]
-        .max()
-        .rename(columns={"ctnt_ng_ml": "episode_max_ctnt_ng_ml"})
-    )
-
-    primary = episode[["id"]].copy()
-    primary["label"] = (episode["episode_max_ctnt_ng_ml"] > 0.10).astype(int)
-
-    high = episode[["id"]].copy()
-    high["label"] = (episode["episode_max_ctnt_ng_ml"] > 0.20).astype(int)
-
-    gray_mask = episode["episode_max_ctnt_ng_ml"].between(
-        0.08, 0.12, inclusive="both"
-    )
-    gray = episode.loc[~gray_mask, ["id"]].copy()
-    gray["label"] = (
-        episode.loc[~gray_mask, "episode_max_ctnt_ng_ml"] > 0.10
-    ).astype(int).to_numpy()
-
-    episode.to_csv(
-        EVALUATION_DIR / "episode_max_ctnt_ng_ml.csv",
-        index=False,
-    )
-    return primary, high, gray
-
-
-def compare_label_sets(reference, derived, name):
-    missing = sorted(set(reference["id"]) - set(derived["id"]))
-    if missing:
-        raise RuntimeError(
-            f"{name}: cTnT-derived labels are missing {len(missing)} required IDs: "
-            f"{missing[:20]}"
-        )
-
-    merged = reference.merge(
-        derived,
-        on="id",
-        how="inner",
-        suffixes=("_reference", "_derived"),
-    )
-    mismatched = merged[merged["label_reference"] != merged["label_derived"]]
-    if not mismatched.empty:
-        raise RuntimeError(
-            f"{name}: prepared labels disagree with cTnT-derived labels for "
-            f"{len(mismatched)} IDs."
-        )
-
-
-def sensitivity_metrics(label_df, full_df, analysis_name):
-    missing = sorted(set(label_df["id"]) - set(full_df["id"]))
-    if missing:
-        raise RuntimeError(
-            f"{analysis_name}: {len(missing)} labeled IDs have no successful "
-            f"full-model prediction: {missing[:20]}"
-        )
-
-    merged = (
-        label_df.merge(full_df, on="id", how="inner")
-        .sort_values("id")
-        .reset_index(drop=True)
-    )
-    if merged.empty:
-        raise RuntimeError(f"{analysis_name}: no prediction IDs matched labels.")
-
-    metrics = classification_metrics(
-        merged["label"],
-        merged["full_probability"],
-        "Physiology-informed model",
-        analysis_name,
-    )
     return merged, metrics
 
 
-for path in [LABEL_CSV, FULL_PRED_CSV, BASELINE_PRED_CSV]:
+for path in [
+    PRIMARY_LABEL_CSV,
+    LABEL_020_CSV,
+    LABEL_GRAY_EXCLUDED_CSV,
+    FULL_PRED_CSV,
+    BASELINE_PRED_CSV,
+]:
     if not path.exists():
         raise FileNotFoundError(f"Cannot find:\n{path}")
 
-primary_labels = load_labels(LABEL_CSV)
+primary_labels = load_labels(PRIMARY_LABEL_CSV)
+labels_020 = load_labels(LABEL_020_CSV)
+labels_gray = load_labels(LABEL_GRAY_EXCLUDED_CSV)
 full_predictions = load_predictions(FULL_PRED_CSV, "full_probability")
-baseline_predictions = load_predictions(BASELINE_PRED_CSV, "baseline_probability")
+baseline_predictions = load_predictions(
+    BASELINE_PRED_CSV,
+    "baseline_probability",
+)
 
-paired = make_primary_paired_dataset(
+# Full-model primary external cohort:
+# used for primary AUROC, threshold metrics, Brier, and calibration.
+full_external, full_metrics = evaluate_full_model(
     primary_labels,
     full_predictions,
-    baseline_predictions,
+    "primary_ctnt_gt_0.10",
 )
-paired.to_csv(
+full_external.to_csv(
+    EVALUATION_DIR / "full_model_predictions_with_labels.csv",
+    index=False,
+    encoding="utf-8-sig",
+)
+
+full_y = full_external["label"].to_numpy(dtype=int)
+full_prob = full_external["full_probability"].to_numpy(dtype=float)
+
+# Paired external cohort:
+# used for full-vs-baseline ROC, paired DeLong, and DCA.
+paired_external = (
+    primary_labels
+    .merge(full_predictions, on="id", how="inner")
+    .merge(baseline_predictions, on="id", how="inner")
+    .sort_values("id")
+    .reset_index(drop=True)
+)
+if paired_external.empty:
+    raise RuntimeError("No paired external predictions are available.")
+if paired_external["label"].nunique() != 2:
+    raise RuntimeError("Both classes are required in the paired external cohort.")
+
+paired_external.to_csv(
     EVALUATION_DIR / "paired_primary_external_predictions.csv",
     index=False,
     encoding="utf-8-sig",
 )
 
-full_metrics = classification_metrics(
-    paired["label"],
-    paired["full_probability"],
-    "Physiology-informed model",
-    "primary_ctnt_gt_0.10",
-)
-baseline_metrics = classification_metrics(
-    paired["label"],
-    paired["baseline_probability"],
-    "EchoJEPA baseline",
-    "primary_ctnt_gt_0.10",
+if len(full_external) != len(paired_external):
+    print(
+        "WARNING: full-model and paired external cohorts differ in size. "
+        "Primary full-model metrics/calibration use the full-model cohort; "
+        "DeLong/DCA use only paired cases."
+    )
+
+paired_y = paired_external["label"].to_numpy(dtype=int)
+paired_full_prob = paired_external["full_probability"].to_numpy(dtype=float)
+paired_baseline_prob = paired_external["baseline_probability"].to_numpy(dtype=float)
+
+paired_full_auc = float(roc_auc_score(paired_y, paired_full_prob))
+paired_baseline_auc = float(roc_auc_score(paired_y, paired_baseline_prob))
+paired_full_ci = bootstrap_auc_ci(paired_y, paired_full_prob)
+paired_baseline_ci = bootstrap_auc_ci(paired_y, paired_baseline_prob)
+
+delong_result = paired_delong_test(
+    paired_y,
+    paired_full_prob,
+    paired_baseline_prob,
 )
 
-delong = paired_delong_test(
-    paired["label"],
-    paired["full_probability"],
-    paired["baseline_probability"],
+pd.DataFrame(
+    [
+        {
+            "Full model AUROC": paired_full_auc,
+            "EchoJEPA baseline AUROC": paired_baseline_auc,
+            "Delta AUROC": delong_result["delta_auc"],
+            "Delta AUROC 95% CI lower": delong_result["delta_ci_lower"],
+            "Delta AUROC 95% CI upper": delong_result["delta_ci_upper"],
+            "DeLong P value": delong_result["p_value"],
+            "Paired N": len(paired_y),
+        }
+    ]
+).to_csv(
+    EVALUATION_DIR / "Figure4_DeLong_results.csv",
+    index=False,
+    encoding="utf-8-sig",
 )
-pd.DataFrame([delong]).to_csv(
-    EVALUATION_DIR / "paired_delong_test.csv",
+
+# Calibration: 10 quantile bins with pointwise Wilson 95% CIs.
+(
+    calibration_pred,
+    calibration_obs,
+    calibration_low,
+    calibration_high,
+    calibration_n,
+) = calibration_with_ci(
+    full_y,
+    full_prob,
+    n_bins=CALIBRATION_BINS,
+)
+
+pd.DataFrame(
+    {
+        "mean_predicted_probability": calibration_pred,
+        "observed_event_fraction": calibration_obs,
+        "observed_fraction_95ci_lower": calibration_low,
+        "observed_fraction_95ci_upper": calibration_high,
+        "n": calibration_n,
+    }
+).to_csv(
+    EVALUATION_DIR / "external_calibration_curve.csv",
+    index=False,
+    encoding="utf-8-sig",
+)
+
+calibration_stats = calibration_intercept_slope(
+    full_y,
+    full_prob,
+)
+
+pd.DataFrame(
+    [
+        {
+            "Metric": "Brier score",
+            "Estimate": full_metrics["brier"],
+            "95% CI lower": np.nan,
+            "95% CI upper": np.nan,
+        },
+        {
+            "Metric": "Calibration intercept",
+            "Estimate": calibration_stats["intercept"],
+            "95% CI lower": calibration_stats["intercept_ci_lower"],
+            "95% CI upper": calibration_stats["intercept_ci_upper"],
+        },
+        {
+            "Metric": "Calibration slope",
+            "Estimate": calibration_stats["slope"],
+            "95% CI lower": calibration_stats["slope_ci_lower"],
+            "95% CI upper": calibration_stats["slope_ci_upper"],
+        },
+    ]
+).to_csv(
+    EVALUATION_DIR / "Supplementary_calibration_metrics.csv",
+    index=False,
+    encoding="utf-8-sig",
+)
+
+fig, ax = plt.subplots(figsize=(6, 6))
+ax.plot([0, 1], [0, 1], linestyle="--", linewidth=1, label="Perfect calibration")
+ax.fill_between(
+    calibration_pred,
+    calibration_low,
+    calibration_high,
+    alpha=0.20,
+    linewidth=0,
+    label="Pointwise 95% Wilson CI",
+)
+ax.plot(
+    calibration_pred,
+    calibration_obs,
+    marker="o",
+    linewidth=1.5,
+    label=f"Physiology-informed model (Brier={full_metrics['brier']:.3f})",
+)
+ax.set_xlim(0, 1)
+ax.set_ylim(0, 1)
+ax.set_xlabel("Predicted probability")
+ax.set_ylabel("Observed proportion")
+ax.set_title("External calibration")
+ax.legend(loc="best")
+fig.tight_layout()
+fig.savefig(EVALUATION_DIR / "external_calibration_curve.png", dpi=600)
+fig.savefig(EVALUATION_DIR / "external_calibration_curve.pdf")
+plt.close(fig)
+
+# Decision curve analysis: exact Figure 4 range/grid.
+thresholds = np.linspace(
+    DCA_THRESHOLD_MIN,
+    DCA_THRESHOLD_MAX,
+    DCA_POINTS,
+)
+full_net_benefit = calculate_net_benefit(
+    paired_y,
+    paired_full_prob,
+    thresholds,
+)
+baseline_net_benefit = calculate_net_benefit(
+    paired_y,
+    paired_baseline_prob,
+    thresholds,
+)
+prevalence = float(np.mean(paired_y))
+treat_all = (
+    prevalence
+    - (1.0 - prevalence)
+    * thresholds
+    / (1.0 - thresholds)
+)
+treat_none = np.zeros_like(thresholds)
+
+pd.DataFrame(
+    {
+        "threshold_probability": thresholds,
+        "physiology_informed_net_benefit": full_net_benefit,
+        "echojepa_baseline_net_benefit": baseline_net_benefit,
+        "treat_all_net_benefit": treat_all,
+        "treat_none_net_benefit": treat_none,
+    }
+).to_csv(
+    EVALUATION_DIR / "external_decision_curve.csv",
     index=False,
 )
 
-save_roc_plot(paired, full_metrics, baseline_metrics)
-brier = save_calibration(paired)
-save_decision_curve(paired)
+fig, ax = plt.subplots(figsize=(7, 6))
+ax.plot(thresholds, full_net_benefit, label="Physiology-informed model")
+ax.plot(thresholds, baseline_net_benefit, label="EchoJEPA baseline")
+ax.plot(thresholds, treat_all, linestyle="--", label="Treat all")
+ax.plot(thresholds, treat_none, linestyle=":", label="Treat none")
+ax.set_xlim(DCA_THRESHOLD_MIN, DCA_THRESHOLD_MAX)
+ax.set_xlabel("Threshold probability")
+ax.set_ylabel("Net benefit")
+ax.set_title("External decision curve analysis")
+ax.legend(loc="best")
+fig.tight_layout()
+fig.savefig(EVALUATION_DIR / "external_decision_curve.png", dpi=600)
+fig.savefig(EVALUATION_DIR / "external_decision_curve.pdf")
+plt.close(fig)
 
-if not np.isclose(brier, full_metrics["brier"], atol=1e-12, rtol=0):
-    raise RuntimeError("Brier-score consistency check failed.")
+# Paired ROC figure.
+full_fpr, full_tpr, _ = roc_curve(paired_y, paired_full_prob)
+baseline_fpr, baseline_tpr, _ = roc_curve(paired_y, paired_baseline_prob)
 
-metric_rows = [full_metrics, baseline_metrics]
+fig, ax = plt.subplots(figsize=(6, 6))
+ax.plot(
+    full_fpr,
+    full_tpr,
+    linewidth=1.5,
+    label=f"Physiology-informed model (AUC={paired_full_auc:.3f})",
+)
+ax.plot(
+    baseline_fpr,
+    baseline_tpr,
+    linewidth=1.5,
+    label=f"EchoJEPA baseline (AUC={paired_baseline_auc:.3f})",
+)
+ax.plot([0, 1], [0, 1], linestyle="--", linewidth=1)
+ax.set_xlabel("False Positive Rate")
+ax.set_ylabel("True Positive Rate")
+ax.set_title("External validation ROC")
+ax.legend(loc="lower right")
+fig.tight_layout()
+fig.savefig(EVALUATION_DIR / "external_roc_comparison.png", dpi=600)
+fig.savefig(EVALUATION_DIR / "external_roc_comparison.pdf")
+plt.close(fig)
 
-derived_primary = derived_020 = derived_gray = None
-if CTNT_CSV is not None:
-    if not CTNT_CSV.exists():
-        raise FileNotFoundError(f"Cannot find:\n{CTNT_CSV}")
-    derived_primary, derived_020, derived_gray = load_ctnt_labels(CTNT_CSV)
-    compare_label_sets(
-        primary_labels,
-        derived_primary,
-        "Primary cTnT >0.10 ng/mL analysis",
-    )
+# Sensitivity analyses use the same locked full-model probabilities;
+# only the precomputed reference-label CSV changes.
+sensitivity_020, metrics_020 = evaluate_full_model(
+    labels_020,
+    full_predictions,
+    "sensitivity_ctnt_gt_0.20",
+)
+sensitivity_gray, metrics_gray = evaluate_full_model(
+    labels_gray,
+    full_predictions,
+    "sensitivity_exclude_0.08_to_0.12",
+)
 
-if LABEL_020_CSV is not None:
-    if not LABEL_020_CSV.exists():
-        raise FileNotFoundError(f"Cannot find:\n{LABEL_020_CSV}")
-    labels_020 = load_labels(LABEL_020_CSV)
-    if derived_020 is not None:
-        compare_label_sets(
-            labels_020,
-            derived_020,
-            "Sensitivity cTnT >0.20 ng/mL analysis",
-        )
-elif derived_020 is not None:
-    labels_020 = derived_020
-else:
-    labels_020 = None
+sensitivity_020.to_csv(
+    EVALUATION_DIR / "sensitivity_ctnt_gt_0.20_predictions.csv",
+    index=False,
+    encoding="utf-8-sig",
+)
+sensitivity_gray.to_csv(
+    EVALUATION_DIR / "sensitivity_exclude_0.08_to_0.12_predictions.csv",
+    index=False,
+    encoding="utf-8-sig",
+)
 
-if LABEL_GRAY_EXCLUDED_CSV is not None:
-    if not LABEL_GRAY_EXCLUDED_CSV.exists():
-        raise FileNotFoundError(f"Cannot find:\n{LABEL_GRAY_EXCLUDED_CSV}")
-    labels_gray = load_labels(LABEL_GRAY_EXCLUDED_CSV)
-    if derived_gray is not None:
-        compare_label_sets(
-            labels_gray,
-            derived_gray,
-            "Sensitivity exclusion 0.08-0.12 ng/mL analysis",
-        )
-elif derived_gray is not None:
-    labels_gray = derived_gray
-else:
-    labels_gray = None
+baseline_metrics = {
+    "analysis": "primary_ctnt_gt_0.10",
+    "model": "EchoJEPA baseline",
+    "n": int(len(paired_y)),
+    "n_SICM": int((paired_y == 1).sum()),
+    "n_sepsis_only": int((paired_y == 0).sum()),
+    "auc": paired_baseline_auc,
+    "auc_95ci_lower": paired_baseline_ci[0],
+    "auc_95ci_upper": paired_baseline_ci[1],
+    "accuracy": np.nan,
+    "sensitivity": np.nan,
+    "specificity": np.nan,
+    "f1": np.nan,
+    "brier": np.nan,
+    "threshold": np.nan,
+    "tp": np.nan,
+    "tn": np.nan,
+    "fp": np.nan,
+    "fn": np.nan,
+}
 
-if labels_020 is not None:
-    merged_020, metrics_020 = sensitivity_metrics(
-        labels_020,
-        full_predictions,
-        "sensitivity_ctnt_gt_0.20",
-    )
-    merged_020.to_csv(
-        EVALUATION_DIR / "sensitivity_ctnt_gt_0.20_predictions.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )
-    metric_rows.append(metrics_020)
-
-if labels_gray is not None:
-    merged_gray, metrics_gray = sensitivity_metrics(
-        labels_gray,
-        full_predictions,
-        "sensitivity_exclude_0.08_to_0.12",
-    )
-    merged_gray.to_csv(
-        EVALUATION_DIR / "sensitivity_exclude_0.08_to_0.12_predictions.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )
-    metric_rows.append(metrics_gray)
-
-performance_df = pd.DataFrame(metric_rows)
-performance_df.to_csv(
+pd.DataFrame(
+    [
+        full_metrics,
+        baseline_metrics,
+        metrics_020,
+        metrics_gray,
+    ]
+).to_csv(
     EVALUATION_DIR / "external_model_performance.csv",
     index=False,
     encoding="utf-8-sig",
@@ -766,27 +765,61 @@ print("\n" + "=" * 80)
 print("EXTERNAL VALIDATION RESULTS")
 print("=" * 80)
 
-for m in metric_rows:
-    print(f"\n{m['analysis']} | {m['model']}")
-    print(f"N           : {m['n']}")
-    print(f"SICM/control: {m['n_SICM']}/{m['n_sepsis_only']}")
+for metrics in [full_metrics, metrics_020, metrics_gray]:
+    print(f"\n{metrics['analysis']} | {metrics['model']}")
+    print(f"N           : {metrics['n']}")
+    print(f"SICM/control: {metrics['n_SICM']}/{metrics['n_sepsis_only']}")
     print(
-        f"AUC         : {m['auc']:.4f} "
-        f"(95% CI {m['auc_95ci_lower']:.4f}-"
-        f"{m['auc_95ci_upper']:.4f})"
+        f"AUC         : {metrics['auc']:.4f} "
+        f"(95% CI {metrics['auc_95ci_lower']:.4f}-"
+        f"{metrics['auc_95ci_upper']:.4f})"
     )
-    print(f"Brier       : {m['brier']:.4f}")
-    print(f"Accuracy    : {m['accuracy']:.4f}")
-    print(f"Sensitivity : {m['sensitivity']:.4f}")
-    print(f"Specificity : {m['specificity']:.4f}")
-    print(f"F1          : {m['f1']:.4f}")
-    print(f"TP/TN/FP/FN : {m['tp']}/{m['tn']}/{m['fp']}/{m['fn']}")
+    print(f"Accuracy    : {metrics['accuracy']:.4f}")
+    print(f"Sensitivity : {metrics['sensitivity']:.4f}")
+    print(f"Specificity : {metrics['specificity']:.4f}")
+    print(f"F1          : {metrics['f1']:.4f}")
+    print(f"Brier       : {metrics['brier']:.4f}")
+    print(
+        f"TP/TN/FP/FN : "
+        f"{metrics['tp']}/{metrics['tn']}/"
+        f"{metrics['fp']}/{metrics['fn']}"
+    )
 
-print("\nPaired DeLong comparison")
+print("\nPAIRED EXTERNAL MODEL COMPARISON")
+print(f"N                : {len(paired_y)}")
 print(
-    f"Delta AUC   : {delong['auc_difference_full_minus_baseline']:.4f} "
-    f"(95% CI {delong['difference_95ci_lower']:.4f}-"
-    f"{delong['difference_95ci_upper']:.4f})"
+    f"Full model AUC   : {paired_full_auc:.4f} "
+    f"(95% CI {paired_full_ci[0]:.4f}-{paired_full_ci[1]:.4f})"
 )
-print(f"P (2-sided) : {delong['p_value_two_sided']:.6g}")
+print(
+    f"EchoJEPA AUC     : {paired_baseline_auc:.4f} "
+    f"(95% CI {paired_baseline_ci[0]:.4f}-{paired_baseline_ci[1]:.4f})"
+)
+print(
+    f"Delta AUC        : {delong_result['delta_auc']:.4f} "
+    f"(95% CI {delong_result['delta_ci_lower']:.4f}-"
+    f"{delong_result['delta_ci_upper']:.4f})"
+)
+print(f"DeLong P         : {delong_result['p_value']:.6g}")
+
+print("\nCALIBRATION")
+print(f"Brier            : {full_metrics['brier']:.4f}")
+print(
+    f"Intercept        : {calibration_stats['intercept']:.4f} "
+    f"(95% CI {calibration_stats['intercept_ci_lower']:.4f}-"
+    f"{calibration_stats['intercept_ci_upper']:.4f})"
+)
+print(
+    f"Slope            : {calibration_stats['slope']:.4f} "
+    f"(95% CI {calibration_stats['slope_ci_lower']:.4f}-"
+    f"{calibration_stats['slope_ci_upper']:.4f})"
+)
+
+print("\nDCA")
+print(
+    f"Threshold range  : {DCA_THRESHOLD_MIN:.2f}-"
+    f"{DCA_THRESHOLD_MAX:.2f} ({DCA_POINTS} equally spaced points)"
+)
+print(f"Paired prevalence: {prevalence:.4f}")
+
 print("\nOutputs:", EVALUATION_DIR)
