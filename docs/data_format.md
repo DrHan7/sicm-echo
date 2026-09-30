@@ -58,30 +58,30 @@ For reliable evaluation, supply exactly one selected loop per pseudonymous ID an
 
 ## External label and prediction files
 
-The evaluator expects a binary label CSV; provide columns named id,label even though its current loader treats the first two columns positionally. IDs must match the inference outputs. The evaluator reads prediction CSVs with at least:
+The external evaluator uses **three precomputed binary label CSVs**, each with columns named `id,label`:
 
-- id
-- sicm_probability
+1. Primary external analysis: cTnT >0.10 ng/mL.
+2. Sensitivity analysis 1: cTnT >0.20 ng/mL.
+3. Sensitivity analysis 2: patients with cTnT 0.08-0.12 ng/mL are excluded, and the >0.10 ng/mL definition is retained in the remaining cohort.
 
-If present, rows with status != success are discarded. Duplicate prediction IDs are rejected. Both classes must remain after matching. The same prediction table can be evaluated against separately prepared primary and sensitivity-analysis labels.
-
-The source scripts write files containing IDs, labels, paths, or predictions. Keep these files out of Git, including manifests, fold assignments, merged evaluation tables, and prediction CSVs.
-
-
-
-## Optional cTnT file for sensitivity analyses
-
-To derive the manuscript's external reference definitions directly from cTnT values, set SICM_EXTERNAL_CTNT_CSV to a secure CSV kept outside the repository. By default, the evaluator expects columns named id and ctnt_ng_ml; custom names can be supplied with SICM_CTNT_ID_COLUMN and SICM_CTNT_VALUE_COLUMN.
-
-The file may contain one or multiple cTnT measurements per pseudonymous patient ID:
+Example format:
 
 ~~~csv
-id,ctnt_ng_ml
-<study_id_101>,0.07
-<study_id_101>,0.14
-<study_id_102>,0.05
+id,label
+<study_id_101>,1
+<study_id_102>,0
 ~~~
 
-The evaluator takes the maximum conventional cTnT value observed during the septic episode for each ID. This implements the manuscript rule that a patient is positive when at least one value exceeds the cutoff. It derives the primary >0.10 ng/mL definition, the >0.20 ng/mL sensitivity definition, and the sensitivity cohort that excludes episode-level values from 0.08 through 0.12 ng/mL before applying the >0.10 ng/mL cutoff.
+The evaluator reads prediction CSVs with at least:
 
-Do not commit the cTnT file or any generated patient-level label/prediction table.
+- id
+- sicm_probability (or probability)
+
+If a status column is present, rows whose status is not success are excluded. Duplicate successful prediction IDs are rejected.
+
+The primary full-model analysis merges the primary label file with the locked full-model predictions. Model-versus-baseline ROC comparison, paired DeLong testing, and decision-curve analysis use the subset with successful predictions from both models. The two sensitivity analyses reuse the same locked full-model probability table and change only the precomputed label CSV.
+
+The repository does not derive these external labels from raw cTnT values. Clinical label derivation is performed upstream, outside this repository.
+
+The source scripts write files containing IDs, labels, paths, or predictions. Keep all real patient-level label files, manifests, fold assignments, merged evaluation tables, and prediction CSVs outside version control.
+
