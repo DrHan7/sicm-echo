@@ -1,27 +1,28 @@
 """
-Locked external inference companion to scripts/train_echojepa_baseline.py.
-
-The training script is the source of truth for the baseline definition.
-This inference script mirrors its cardiac-cycle preprocessing, EchoJEPA ViT-L
-geometry, equal mean pooling across tokens and retained cycles, and MLP
-classifier. It loads the locked final_model.pt and the training-derived
-LV-segmentation normalization without fitting anything on the external cohort.
+External test inference for the trained PURE EchoJEPA baseline.
 
 Pipeline
 --------
 Raw echocardiographic NPY
-    -> EchoNet-Dynamic LV segmentation for cycle localization only
-    -> primary ED-peak detection on the LV area-time curve
-    -> retain every adjacent ED-to-ED cycle; QC flags do not exclude cycles
-    -> resample each cycle to 16 frames at 224 x 224
+    -> uniformly sample 16 frames from the complete cine loop
+    -> resize to 224 x 224
+    -> grayscale replicated to 3 channels
     -> EchoJEPA ViT-L
-    -> equal mean pooling over all cycle features
+    -> global mean pooling over all spatiotemporal tokens
     -> MLP classifier
     -> one SICM probability per ID
 
-No fallback interval is generated when fewer than two primary ED peaks are
-found. The LV-area representation is not passed to the baseline classifier.
-No labels, random augmentation, adaptation, or fine-tuning are used.
+NOT used
+--------
+- labels
+- LV segmentation
+- ED / ES detection
+- cardiac-cycle alignment
+- self-supervised adaptation
+- spatial / temporal attention
+- physiology branch
+- MIL
+- random augmentation
 """
 
 import os
@@ -34,10 +35,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
 
-from scipy.signal import find_peaks
-from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
 
 
@@ -46,37 +44,54 @@ from tqdm import tqdm
 # ============================================================
 
 def required_env_path(name):
+
     value = os.environ.get(name)
+
     if not value:
-        raise RuntimeError(f"Set the {name} environment variable before running this script.")
+
+        raise RuntimeError(
+            f"Set the {name} environment variable before running this script."
+        )
+
     return Path(value).expanduser()
 
 
-TEST_ROOT = required_env_path("SICM_EXTERNAL_VIDEO_ROOT")
-CHECKPOINT_DIR = Path(os.environ.get("SICM_CHECKPOINT_DIR", "checkpoints")).expanduser()
+TEST_ROOT = required_env_path(
+    "SICM_EXTERNAL_VIDEO_ROOT"
+)
+
+CHECKPOINT_DIR = Path(
+    os.environ.get(
+        "SICM_CHECKPOINT_DIR",
+        "checkpoints",
+    )
+).expanduser()
+
 ECHOJEPA_REPO_DIR = Path(
-    os.environ.get("ECHOJEPA_REPO_DIR", str(CHECKPOINT_DIR / "EchoJEPA"))
-).expanduser()
-MODEL_PATH = required_env_path("SICM_BASELINE_FINAL_MODEL")
-LV_SEGMENTATION_CHECKPOINT = Path(
     os.environ.get(
-        "LV_SEGMENTATION_CHECKPOINT",
-        str(CHECKPOINT_DIR / "deeplabv3_resnet50_random.pt"),
+        "ECHOJEPA_REPO_DIR",
+        CHECKPOINT_DIR / "EchoJEPA",
     )
 ).expanduser()
-SEGMENTATION_NORMALIZATION_CSV = Path(
+
+MODEL_PATH = Path(
     os.environ.get(
-        "SICM_BASELINE_SEGMENTATION_NORMALIZATION_CSV",
-        str(MODEL_PATH.parent / "data_normalization.csv"),
+        "SICM_BASELINE_FINAL_MODEL",
+        "outputs/echojepa_baseline/final_model.pt",
     )
 ).expanduser()
+
 OUTPUT_CSV = Path(
     os.environ.get(
         "SICM_EXTERNAL_BASELINE_PREDICTIONS_CSV",
         "outputs/external/echojepa_baseline_test_predictions.csv",
     )
 ).expanduser()
-OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
+
+OUTPUT_CSV.parent.mkdir(
+    parents=True,
+    exist_ok=True,
+)
 
 
 # ============================================================
@@ -123,16 +138,6 @@ NUM_TOKENS = (
     * SPATIAL_SIDE
 )
 
-SEG_SIZE = 112
-SEG_BATCH_SIZE = 64
-SMOOTH_SIGMA = 1.2
-MIN_ED_DISTANCE = 6
-ED_PROMINENCE_FRACTION = 0.05
-MIN_CYCLE_FRAMES = 6
-MAX_CYCLE_FRAMES = 90
-QC_MIN_AREA_EXCURSION_FRACTION = 0.06
-QC_MAX_ED_AREA_MISMATCH_FRACTION = 0.60
-
 ECHOJEPA_MEAN = torch.tensor(
     [
         0.485,
@@ -169,14 +174,6 @@ for path, description in [
         MODEL_PATH,
         "trained EchoJEPA baseline final_model.pt",
     ),
-    (
-        LV_SEGMENTATION_CHECKPOINT,
-        "EchoNet-Dynamic LV segmentation checkpoint",
-    ),
-    (
-        SEGMENTATION_NORMALIZATION_CSV,
-        "training-set LV-segmentation normalization",
-    ),
 ]:
 
     if not path.exists():
@@ -198,241 +195,288 @@ if str(
         ),
     )
 
-_normalization = pd.read_csv(SEGMENTATION_NORMALIZATION_CSV)
-if not {"mean", "std"}.issubset(_normalization.columns) or len(_normalization) != 3:
-    raise RuntimeError(
-        "Expected three RGB mean/std rows in the training normalization CSV."
+
+# ============================================================
+# 3. VIDEO PREPROCESSING
+# ============================================================
+
+def load_video_tchw(
+    npy_path,
+):
+
+    array = np.asarray(
+        np.load(
+            npy_path,
+            mmap_mode="r",
+        )
     )
-DATA_MEAN = torch.tensor(_normalization["mean"].to_numpy(), dtype=torch.float32)
-DATA_STD = torch.tensor(_normalization["std"].to_numpy(), dtype=torch.float32)
-if torch.any(DATA_STD <= 0):
-    raise RuntimeError("Training-set segmentation standard deviations must be positive.")
 
-
-# ============================================================
-# 3. CARDIAC-CYCLE PREPROCESSING
-# ============================================================
-
-def load_video_tchw(npy_path):
-    array = np.asarray(np.load(npy_path, mmap_mode="r"))
     if array.ndim == 3:
-        x = torch.from_numpy(array.copy()).float().unsqueeze(1)
-    elif array.ndim == 4 and array.shape[-1] in (1, 3):
-        x = torch.from_numpy(array.copy()).float().permute(0, 3, 1, 2)
-    elif array.ndim == 4 and array.shape[1] in (1, 3):
-        x = torch.from_numpy(array.copy()).float()
+
+        # T,H,W
+        x = (
+            torch.from_numpy(
+                array.copy()
+            )
+            .float()
+            .unsqueeze(
+                1
+            )
+        )
+
+    elif (
+        array.ndim == 4
+        and array.shape[
+            -1
+        ] in (
+            1,
+            3,
+        )
+    ):
+
+        # T,H,W,C
+        x = (
+            torch.from_numpy(
+                array.copy()
+            )
+            .float()
+            .permute(
+                0,
+                3,
+                1,
+                2,
+            )
+        )
+
+    elif (
+        array.ndim == 4
+        and array.shape[
+            1
+        ] in (
+            1,
+            3,
+        )
+    ):
+
+        # T,C,H,W
+        x = (
+            torch.from_numpy(
+                array.copy()
+            )
+            .float()
+        )
+
     else:
-        raise ValueError(f"Unsupported video shape {array.shape}: {npy_path}")
+
+        raise ValueError(
+            f"Unsupported video shape {array.shape}: {npy_path}"
+        )
+
     return x
 
 
-def to_three_channel_255(x):
-    if x.shape[1] == 1:
-        x = x.repeat(1, 3, 1, 1)
-    elif x.shape[1] != 3:
-        raise ValueError(f"Channel count must be 1 or 3; got {x.shape[1]}")
+def to_grayscale_01(
+    x,
+):
 
-    vmin, vmax = float(x.min()), float(x.max())
-    if vmin >= 0 and vmax <= 1.5:
-        x = x * 255.0
-    elif vmin < 0 or vmax > 255.0:
-        x = (x - vmin) / (vmax - vmin) * 255.0 if vmax > vmin else torch.zeros_like(x)
-    return x
+    if x.shape[
+        1
+    ] == 3:
 
-
-def to_grayscale_255(x):
-    if x.shape[1] == 3:
-        x = 0.2989 * x[:, 0:1] + 0.5870 * x[:, 1:2] + 0.1140 * x[:, 2:3]
-    elif x.shape[1] != 1:
-        raise ValueError(f"Channel count must be 1 or 3; got {x.shape[1]}")
-
-    vmin, vmax = float(x.min()), float(x.max())
-    if vmin >= 0 and vmax <= 1.5:
-        x = x * 255.0
-    elif vmin < 0 or vmax > 255.0:
-        x = (x - vmin) / (vmax - vmin) * 255.0 if vmax > vmin else torch.zeros_like(x)
-    return x.clamp(0, 255)
-
-
-def build_lv_segmenter(weight_path):
-    try:
-        model = torchvision.models.segmentation.deeplabv3_resnet50(
-            weights=None, weights_backbone=None, aux_loss=False
-        )
-    except TypeError:
-        model = torchvision.models.segmentation.deeplabv3_resnet50(
-            pretrained=False, aux_loss=False
+        x = (
+            0.2989
+            * x[
+                :,
+                0:1
+            ]
+            +
+            0.5870
+            * x[
+                :,
+                1:2
+            ]
+            +
+            0.1140
+            * x[
+                :,
+                2:3
+            ]
         )
 
-    old_last = model.classifier[-1]
-    model.classifier[-1] = nn.Conv2d(
-        old_last.in_channels, 1, kernel_size=old_last.kernel_size
+    elif x.shape[
+        1
+    ] != 1:
+
+        raise ValueError(
+            f"Expected 1 or 3 channels; got {x.shape[1]}"
+        )
+
+    vmin = float(
+        x.min()
     )
-    try:
-        checkpoint = torch.load(weight_path, map_location="cpu", weights_only=False)
-    except TypeError:
-        checkpoint = torch.load(weight_path, map_location="cpu")
-    state_dict = checkpoint.get("state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-    cleaned_state = {
-        (key[7:] if key.startswith("module.") else key): value
-        for key, value in state_dict.items()
-    }
-    result = model.load_state_dict(cleaned_state, strict=False)
-    if result.missing_keys or result.unexpected_keys:
+
+    vmax = float(
+        x.max()
+    )
+
+    if (
+        vmin >= 0
+        and vmax <= 1.5
+    ):
+
+        x = x.clamp(
+            0.0,
+            1.0,
+        )
+
+    elif (
+        vmin >= 0
+        and vmax <= 255.0
+    ):
+
+        x = (
+            x
+            / 255.0
+        ).clamp(
+            0.0,
+            1.0,
+        )
+
+    else:
+
+        if vmax > vmin:
+
+            x = (
+                x
+                - vmin
+            ) / (
+                vmax
+                - vmin
+            )
+
+        else:
+
+            x = torch.zeros_like(
+                x
+            )
+
+    return x.float()
+
+
+def uniform_sample_video(
+    video,
+):
+
+    total_frames = int(
+        video.shape[
+            0
+        ]
+    )
+
+    if total_frames < 1:
+
         raise RuntimeError(
-            "LV segmentation checkpoint does not match DeepLabV3-ResNet50: "
-            f"missing={result.missing_keys[:5]}, unexpected={result.unexpected_keys[:5]}"
+            "Video contains no frames."
         )
-    model = model.to(DEVICE)
-    model.eval()
-    for parameter in model.parameters():
-        parameter.requires_grad = False
-    return model
 
-
-@torch.no_grad()
-def get_lv_area_curve(npy_path, segmenter):
-    original = load_video_tchw(npy_path)
-    x = to_three_channel_255(original.clone())
-    x = F.interpolate(x, size=(SEG_SIZE, SEG_SIZE), mode="bilinear", align_corners=False)
-    x = (x - DATA_MEAN.view(1, 3, 1, 1)) / DATA_STD.view(1, 3, 1, 1)
-
-    areas = []
-    for start in range(0, x.shape[0], SEG_BATCH_SIZE):
-        batch = x[start:start + SEG_BATCH_SIZE].to(DEVICE, non_blocking=True)
-        logits = segmenter(batch)["out"][:, 0]
-        areas.append((logits > 0).sum(dim=(1, 2)).cpu().numpy().astype(np.float32))
-    return original, np.concatenate(areas)
-
-
-def robust_area_range(area):
-    q05, q95 = np.quantile(area, [0.05, 0.95])
-    return max(float(q95 - q05), 1.0)
-
-
-def find_ed_peaks(smooth, area_range, distance, prominence_fraction):
-    peaks, _ = find_peaks(
-        smooth,
-        distance=distance,
-        prominence=prominence_fraction * area_range,
+    indices = np.linspace(
+        0,
+        total_frames - 1,
+        NUM_FRAMES,
     )
-    return peaks
 
-
-def build_cycle_candidate(smooth, area_range, ed1, ed2):
-    ed1, ed2 = int(ed1), int(ed2)
-    period = ed2 - ed1
-    if period < 1:
-        return None
-
-    es = ed1 + int(np.argmin(smooth[ed1:ed2 + 1]))
-    mean_ed_area = (smooth[ed1] + smooth[ed2]) / 2.0
-    es_area = float(smooth[es])
-    excursion_fraction = float((mean_ed_area - es_area) / area_range)
-    ed_area_mismatch_fraction = float(abs(smooth[ed1] - smooth[ed2]) / area_range)
-    return {
-        "method": "primary_peaks",
-        "ed1": ed1,
-        "es": es,
-        "ed2": ed2,
-        "cycle_frames": int(period),
-        "excursion_fraction": excursion_fraction,
-        "ed_area_mismatch_fraction": ed_area_mismatch_fraction,
-        "quality_score": float(excursion_fraction - 0.25 * ed_area_mismatch_fraction),
-        "qc_excursion_low": excursion_fraction < QC_MIN_AREA_EXCURSION_FRACTION,
-        "qc_ed_mismatch_high": ed_area_mismatch_fraction > QC_MAX_ED_AREA_MISMATCH_FRACTION,
-        "qc_cycle_length_outside_preferred": period < MIN_CYCLE_FRAMES or period > MAX_CYCLE_FRAMES,
-    }
-
-
-def detect_all_cycles(raw_area):
-    raw_area = np.asarray(raw_area, dtype=np.float32)
-    if len(raw_area) < 2:
-        raise RuntimeError("Video has fewer than 2 frames; no temporal interval can be formed.")
-
-    smooth = gaussian_filter1d(raw_area, sigma=SMOOTH_SIGMA, mode="nearest")
-    area_range = robust_area_range(smooth)
-    ed_candidates = find_ed_peaks(
-        smooth,
-        area_range,
-        MIN_ED_DISTANCE,
-        ED_PROMINENCE_FRACTION,
+    indices = np.round(
+        indices
+    ).astype(
+        np.int64
     )
-    if len(ed_candidates) < 2:
-        raise RuntimeError(
-            "Fewer than two ED peaks were detected with the primary settings; "
-            "cardiac-cycle detection failed."
-        )
 
-    cycles = []
-    for index in range(len(ed_candidates) - 1):
-        candidate = build_cycle_candidate(
-            smooth, area_range, ed_candidates[index], ed_candidates[index + 1]
-        )
-        if candidate is not None:
-            cycles.append(candidate)
-    if not cycles:
-        raise RuntimeError("No valid adjacent ED-to-ED cycles were found.")
+    indices = np.clip(
+        indices,
+        0,
+        total_frames - 1,
+    )
 
-    return {
-        "cycles": cycles,
-        "smooth_area": smooth,
-        "ed_candidates": ed_candidates,
-        "detection_method": "primary_peaks",
-    }
+    indices = torch.from_numpy(
+        indices
+    ).long()
+
+    return video[
+        indices
+    ]
 
 
-def resample_cycle(original_video, ed1, ed2):
-    cycle = original_video[int(ed1):int(ed2) + 1]
-    if cycle.shape[0] < 2:
-        raise RuntimeError("Detected cycle contains fewer than 2 frames.")
+def prepare_input(
+    npy_path,
+):
 
-    cycle = to_grayscale_255(cycle)
-    cycle = cycle.permute(1, 0, 2, 3).unsqueeze(0)
-    cycle = F.interpolate(
-        cycle,
-        size=(NUM_FRAMES, IMAGE_SIZE, IMAGE_SIZE),
-        mode="trilinear",
+    video = load_video_tchw(
+        npy_path
+    )
+
+    video = to_grayscale_01(
+        video
+    )
+
+    video = uniform_sample_video(
+        video
+    )
+
+    video = F.interpolate(
+        video,
+        size=(
+            IMAGE_SIZE,
+            IMAGE_SIZE,
+        ),
+        mode="bilinear",
         align_corners=False,
     )
-    return (
-        cycle.squeeze(0).squeeze(0).round().clamp(0, 255)
-        .to(torch.uint8).cpu().numpy()
+
+    # T,1,H,W -> T,3,H,W
+    video = video.repeat(
+        1,
+        3,
+        1,
+        1,
     )
 
+    mean = ECHOJEPA_MEAN.view(
+        1,
+        3,
+        1,
+        1,
+    )
 
-def prepare_echojepa_cycle(cycle_array):
+    std = ECHOJEPA_STD.view(
+        1,
+        3,
+        1,
+        1,
+    )
+
     video = (
-        torch.from_numpy(cycle_array.copy()).float().unsqueeze(1).repeat(1, 3, 1, 1)
-    )
-    if cycle_array.dtype == np.uint8 or float(video.max()) > 1.5:
-        video = video / 255.0
-    video = video.clamp(0.0, 1.0)
-    mean = ECHOJEPA_MEAN.view(1, 3, 1, 1)
-    std = ECHOJEPA_STD.view(1, 3, 1, 1)
-    return (video - mean).div(std).permute(1, 0, 2, 3).contiguous()
+        video
+        - mean
+    ) / std
 
-
-def prepare_input(npy_path, segmenter):
-    original_video, raw_area = get_lv_area_curve(npy_path, segmenter)
-    detection = detect_all_cycles(raw_area)
-    cycle_tensors = [
-        prepare_echojepa_cycle(
-            resample_cycle(original_video, cycle["ed1"], cycle["ed2"])
+    # T,C,H,W -> 1,C,T,H,W
+    return (
+        video
+        .permute(
+            1,
+            0,
+            2,
+            3,
         )
-        for cycle in detection["cycles"]
-    ]
-    if not cycle_tensors:
-        raise RuntimeError("No cardiac cycles were detected.")
-    return torch.stack(cycle_tensors, dim=0), detection
+        .contiguous()
+        .unsqueeze(
+            0
+        )
+    )
 
 
 # ============================================================
 # 4. BUILD EchoJEPA ViT-L ARCHITECTURE
-#
-# Same ViT-L geometry used by train_echojepa_baseline.py.
-# Activation checkpointing is disabled only for inference; it does not change
-# model parameters or the state_dict.
 # ============================================================
 
 def build_echojepa_vitl():
@@ -520,24 +564,45 @@ class EchoJEPABaselineClassifier(
             ),
         )
 
-    def forward(self, video):
-        # video: N_cycles,C,T,H,W (or C,T,H,W for a single cycle)
-        if video.ndim == 4:
-            video = video.unsqueeze(0)
-        if video.ndim != 5:
-            raise RuntimeError(f"Expected (N,C,T,H,W) cycles; got {video.shape}")
+    def forward(
+        self,
+        video,
+    ):
 
-        cycle_features = []
-        for cycle in video:
-            tokens = self.backbone(cycle.unsqueeze(0))
-            if isinstance(tokens, (tuple, list)):
-                tokens = tokens[0]
-            if tokens.ndim != 3:
-                raise RuntimeError(f"Unexpected EchoJEPA output shape: {tokens.shape}")
-            cycle_features.append(tokens.mean(dim=1).squeeze(0))
+        tokens = self.backbone(
+            video
+        )
 
-        feature = torch.stack(cycle_features, dim=0).mean(dim=0, keepdim=True)
-        return self.classifier(feature).squeeze(-1)
+        if isinstance(
+            tokens,
+            (
+                tuple,
+                list,
+            ),
+        ):
+
+            tokens = tokens[
+                0
+            ]
+
+        if tokens.ndim != 3:
+
+            raise RuntimeError(
+                f"Unexpected EchoJEPA output shape: {tokens.shape}"
+            )
+
+        feature = tokens.mean(
+            dim=1
+        )
+
+        return (
+            self.classifier(
+                feature
+            )
+            .squeeze(
+                -1
+            )
+        )
 
 
 # ============================================================
@@ -551,18 +616,38 @@ checkpoint = torch.load(
 )
 
 if isinstance(checkpoint, dict):
+
     expected_metadata = {
-        "base_model": "vitl-vmix22m-pt220-c55",
-        "num_frames": NUM_FRAMES,
-        "image_size": IMAGE_SIZE,
-        "sampling": "all adjacent primary ED-to-ED cycles; each resampled to 16 frames",
-        "pooling": "global mean pooling across all EchoJEPA spatiotemporal tokens from all cycles",
+        "architecture":
+            "EchoJEPA ViT-L + global mean pooling + MLP classifier",
+
+        "base_model":
+            "vitl-vmix22m-pt220-c55",
+
+        "num_frames":
+            NUM_FRAMES,
+
+        "image_size":
+            IMAGE_SIZE,
+
+        "sampling":
+            "uniform sampling from complete cine loop",
+
+        "pooling":
+            "global mean pooling over all EchoJEPA spatiotemporal tokens",
     }
+
     for key, expected_value in expected_metadata.items():
-        if key in checkpoint and checkpoint[key] != expected_value:
+
+        if (
+            key in checkpoint
+            and checkpoint[key] != expected_value
+        ):
+
             raise RuntimeError(
-                "Baseline checkpoint metadata does not match the locked training "
-                f"pipeline: {key}={checkpoint[key]!r}, expected {expected_value!r}."
+                "Baseline checkpoint metadata does not match the locked "
+                f"training pipeline: {key}={checkpoint[key]!r}, "
+                f"expected {expected_value!r}."
             )
 
 if (
@@ -632,24 +717,37 @@ if len(
     )
 
 
-# External data use the immediate parent directory as the pseudonymous ID.
-# Require exactly one selected A4C NPY per ID so that paired evaluation cannot
-# silently receive duplicate predictions.
+# External prediction IDs are the immediate parent directory names.
+# Require exactly one selected A4C NPY per pseudonymous ID.
 paths_by_id = {}
+
 for path in npy_paths:
-    sample_id = str(path.parent.name).strip()
-    paths_by_id.setdefault(sample_id, []).append(path)
+
+    sample_id = str(
+        path.parent.name
+    ).strip()
+
+    paths_by_id.setdefault(
+        sample_id,
+        [],
+    ).append(path)
 
 duplicate_ids = {
     sample_id: paths
     for sample_id, paths in paths_by_id.items()
     if len(paths) != 1
 }
+
 if duplicate_ids:
+
     details = {
-        sample_id: [str(path.relative_to(TEST_ROOT)) for path in paths]
+        sample_id: [
+            str(path.relative_to(TEST_ROOT))
+            for path in paths
+        ]
         for sample_id, paths in duplicate_ids.items()
     }
+
     raise RuntimeError(
         "Each external pseudonymous ID must have exactly one selected A4C NPY. "
         f"Duplicate IDs/files: {details}"
@@ -694,12 +792,9 @@ print(
     "=" * 80
 )
 
-lv_segmenter = build_lv_segmenter(LV_SEGMENTATION_CHECKPOINT)
-
 
 # ============================================================
-# 8. TEST INFERENCE
-# ============================================================
+# 8. TEST INFERENCE# ============================================================
 
 records = []
 
@@ -715,11 +810,9 @@ for npy_path in tqdm(
 
     try:
 
-        video, detection = prepare_input(
-            npy_path,
-            lv_segmenter,
-        )
-        video = video.to(
+        video = prepare_input(
+            npy_path
+        ).to(
             DEVICE,
             non_blocking=True,
         )
@@ -760,9 +853,6 @@ for npy_path in tqdm(
 
                 "npy_file":
                     npy_path.name,
-
-                "n_cycles":
-                    int(video.shape[0]),
 
                 "relative_path":
                     str(
@@ -808,9 +898,6 @@ for npy_path in tqdm(
 
                 "npy_file":
                     npy_path.name,
-
-                "n_cycles":
-                    np.nan,
 
                 "relative_path":
                     str(
@@ -899,4 +986,3 @@ print(
 print(
     "=" * 80
 )
-
