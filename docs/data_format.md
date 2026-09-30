@@ -17,7 +17,7 @@ id,label
 - Each labeled ID must match a `.npy` file whose filename stem is the ID. Full-model training, baseline training, and CV search the configured video root recursively. CV expects one raw video per ID.
 - The scripts do not derive these labels or enforce the manuscript's cohort-selection, clinical exclusion, or time-window criteria.
 
-The full-model training script validates column names and binary values, rejects conflicting labels, and requires a matching video for every ID. The baseline training script reads the first two columns positionally as `id,label`, keeps binary-labeled matched videos, and requires both classes. CV validates the labels and ID/video matches before assigning folds. Do not add a real label CSV to this repository; use an external secure path.
+The full-model training script and the direct EchoJEPA baseline both validate exact `id,label` columns, binary values, conflicting labels, and one matching `<id>.npy` file for every labeled ID. CV validates the same ID/video relationship before assigning folds. Do not add a real label CSV to this repository; use an external secure path.
 
 ## NumPy cine-loop arrays
 
@@ -27,7 +27,7 @@ One file represents one selected A4C cine loop. The loaders accept these layouts
 - T x H x W x C, where C is 1 or 3
 - T x C x H x W, where C is 1 or 3
 
-The values should consistently encode the frame intensities, ordinarily as 8-bit values (0 to 255) or normalized floating-point values (0 to 1). The source code converts supported arrays to grayscale for cycle preparation and constructs three-channel input for the EchoNet-Dynamic segmenter and EchoJEPA encoder. Unsupported dimensions/channel layouts fail at load time.
+The values should consistently encode the frame intensities, ordinarily as 8-bit values (0 to 255) or normalized floating-point values (0 to 1). The physiology-informed pipeline converts supported arrays for LV-segmentation/cycle preprocessing and EchoJEPA encoding. The direct EchoJEPA baseline instead converts the complete cine loop to grayscale, uniformly samples 16 frames, resizes them to 224 x 224, replicates them to three channels, and applies EchoJEPA normalization. Unsupported dimensions/channel layouts fail at load time.
 
 Development file layout (used by both model-training scripts and CV):
 
@@ -40,6 +40,8 @@ Development file layout (used by both model-training scripts and CV):
 ~~~
 
 Any subdirectory component named outcome is excluded by the source scanners. Do not place generated cycle caches inside the raw input tree.
+
+The direct EchoJEPA baseline uses the same development ID/file matching convention as the full model, but it does **not** perform LV segmentation, ED/ES detection, cardiac-cycle extraction, physiological feature construction, attention pooling, or MIL.
 
 ## External inference video layout
 
