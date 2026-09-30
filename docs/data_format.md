@@ -67,3 +67,21 @@ If present, rows with status != success are discarded. Duplicate prediction IDs 
 
 The source scripts write files containing IDs, labels, paths, or predictions. Keep these files out of Git, including manifests, fold assignments, merged evaluation tables, and prediction CSVs.
 
+
+
+## Optional cTnT file for sensitivity analyses
+
+To derive the manuscript's external reference definitions directly from cTnT values, set SICM_EXTERNAL_CTNT_CSV to a secure CSV kept outside the repository. By default, the evaluator expects columns named id and ctnt_ng_ml; custom names can be supplied with SICM_CTNT_ID_COLUMN and SICM_CTNT_VALUE_COLUMN.
+
+The file may contain one or multiple cTnT measurements per pseudonymous patient ID:
+
+~~~csv
+id,ctnt_ng_ml
+<study_id_101>,0.07
+<study_id_101>,0.14
+<study_id_102>,0.05
+~~~
+
+The evaluator takes the maximum conventional cTnT value observed during the septic episode for each ID. This implements the manuscript rule that a patient is positive when at least one value exceeds the cutoff. It derives the primary >0.10 ng/mL definition, the >0.20 ng/mL sensitivity definition, and the sensitivity cohort that excludes episode-level values from 0.08 through 0.12 ng/mL before applying the >0.10 ng/mL cutoff.
+
+Do not commit the cTnT file or any generated patient-level label/prediction table.
