@@ -1,29 +1,3 @@
-"""
-External test inference for the trained PURE EchoJEPA baseline.
-
-Pipeline
---------
-Raw echocardiographic NPY
-    -> uniformly sample 16 frames from the complete cine loop
-    -> resize to 224 x 224
-    -> grayscale replicated to 3 channels
-    -> EchoJEPA ViT-L
-    -> global mean pooling over all spatiotemporal tokens
-    -> MLP classifier
-    -> one SICM probability per ID
-
-NOT used
---------
-- labels
-- LV segmentation
-- ED / ES detection
-- cardiac-cycle alignment
-- self-supervised adaptation
-- spatial / temporal attention
-- physiology branch
-- MIL
-- random augmentation
-"""
 
 import os
 import sys
@@ -37,10 +11,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from tqdm import tqdm
-
-
-
-
 
 
 def required_env_path(name):
@@ -92,10 +62,6 @@ OUTPUT_CSV.parent.mkdir(
     parents=True,
     exist_ok=True,
 )
-
-
-
-
 
 
 DEVICE = torch.device(
@@ -157,10 +123,6 @@ ECHOJEPA_STD = torch.tensor(
 )
 
 
-
-
-
-
 for path, description in [
     (
         TEST_ROOT,
@@ -194,10 +156,6 @@ if str(
             ECHOJEPA_REPO_DIR
         ),
     )
-
-
-
-
 
 
 def load_video_tchw(
@@ -475,10 +433,6 @@ def prepare_input(
     )
 
 
-
-
-
-
 def build_echojepa_vitl():
 
     from src.models import (
@@ -524,10 +478,6 @@ def build_echojepa_vitl():
         )
 
     return encoder
-
-
-
-
 
 
 class EchoJEPABaselineClassifier(
@@ -603,10 +553,6 @@ class EchoJEPABaselineClassifier(
                 -1
             )
         )
-
-
-
-
 
 
 checkpoint = torch.load(
@@ -688,10 +634,6 @@ for parameter in model.parameters():
     parameter.requires_grad = False
 
 
-
-
-
-
 npy_paths = sorted(
     [
         path
@@ -715,8 +657,6 @@ if len(
     raise RuntimeError(
         f"No .npy files found under:\n{TEST_ROOT}"
     )
-
-
 
 
 paths_by_id = {}
@@ -791,9 +731,6 @@ print(
 print(
     "=" * 80
 )
-
-
-
 
 
 records = []
@@ -924,10 +861,6 @@ for npy_path in tqdm(
                     ),
             }
         )
-
-
-
-
 
 
 result_df = pd.DataFrame(
