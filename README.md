@@ -167,14 +167,23 @@ This baseline also uses primary ED peaks and all adjacent cycles, then averages 
 
 ## External evaluation
 
-The external evaluator reproduces the manuscript-level discrimination, threshold-based classification, calibration/Brier, paired model comparison, decision-curve, and cTnT sensitivity-analysis workflow. Primary model comparison is performed only when the physiology-informed model and EchoJEPA baseline have successful predictions for the same labeled patient IDs.
+The external evaluator reproduces the reported Figure 4/statistical workflow: primary discrimination and threshold metrics, Brier score and calibration, paired comparison with the EchoJEPA baseline, decision-curve analysis, and the two cTnT sensitivity analyses.
 
-### Primary analysis
+The analysis uses three **precomputed binary label CSVs**. Model probabilities are fixed; the sensitivity analyses change only the reference labels.
 
-Supply the prepared primary binary labels (cTnT >0.10 ng/mL), plus both prediction files:
+### Required label files
 
 ~~~bash
+# Primary external definition: cTnT >0.10 ng/mL
 export SICM_EXTERNAL_LABELS_CSV="/secure/path/external/id_label_primary.csv"
+
+# Sensitivity analysis 1: cTnT >0.20 ng/mL
+export SICM_EXTERNAL_LABELS_020_CSV="/secure/path/external/id_label_ctnt_gt_020.csv"
+
+# Sensitivity analysis 2:
+# exclude cTnT 0.08-0.12 ng/mL, then retain the >0.10 ng/mL definition
+export SICM_EXTERNAL_LABELS_GRAY_EXCLUDED_CSV="/secure/path/external/id_label_exclude_008_012.csv"
+
 export SICM_EXTERNAL_FULL_PREDICTIONS_CSV="outputs/external/physiology_informed_test_predictions.csv"
 export SICM_EXTERNAL_BASELINE_PREDICTIONS_CSV="outputs/external/echojepa_baseline_test_predictions.csv"
 export SICM_EXTERNAL_EVALUATION_DIR="outputs/external/evaluation"
@@ -182,50 +191,39 @@ export SICM_EXTERNAL_EVALUATION_DIR="outputs/external/evaluation"
 python scripts/evaluate_external_test_auc.py
 ~~~
 
-The script calculates:
+### Implemented analysis settings
 
-- AUROC with percentile-bootstrap 95% CI (2,000 resamples; seed 42 by default).
-- Accuracy, sensitivity, specificity, F1 score, and confusion-matrix counts at the prespecified 0.5 probability threshold.
-- Brier score for the physiology-informed model and the EchoJEPA baseline.
-- A calibration curve for the physiology-informed model with pointwise 95% confidence intervals.
-- Paired DeLong comparison of the two AUROCs, including the AUROC difference, 95% CI, and two-sided P value.
-- Decision-curve net benefit for the physiology-informed model, EchoJEPA baseline, treat-all, and treat-none strategies.
-- A paired primary-analysis table containing the identical patient IDs used by both models.
+The evaluator follows the settings used by the Figure 4 analysis script:
 
-Key outputs include external_model_performance.csv, paired_delong_test.csv, paired_primary_external_predictions.csv, external_calibration_curve.csv/.png/.pdf, external_decision_curve.csv/.png/.pdf, and external_roc_comparison.png/.pdf.
+- Probability threshold: 0.5.
+- AUROC 95% CI: percentile bootstrap with 2,000 resamples and seed 42.
+- Calibration: 10 quantile bins.
+- Pointwise calibration 95% CI: Wilson interval.
+- Calibration intercept and slope: logistic recalibration of outcome on the logit of the predicted probability; 95% CIs use estimate ± 1.96 × standard error.
+- Paired model comparison: paired DeLong test using patients with predictions from both models.
+- Decision-curve analysis: threshold probabilities from 0.05 to 0.60 using 200 equally spaced points.
+- Sensitivity analyses: the same locked full-model probabilities are re-evaluated against the two alternative precomputed label files; the model is not retrained or recalibrated.
 
-### Sensitivity analyses
+Primary full-model AUROC, threshold metrics, Brier score, and calibration use all primary-label patients with a successful full-model prediction. Full-model versus EchoJEPA ROC comparison, paired DeLong testing, and DCA use the paired external cohort containing patients with successful predictions from both models.
 
-The manuscript uses the same locked model probabilities and changes only the cTnT-based reference definition:
+The script writes, among other outputs:
 
-1. Primary: episode cTnT >0.10 ng/mL.
-2. Sensitivity analysis 1: episode cTnT >0.20 ng/mL.
-3. Sensitivity analysis 2: exclude patients whose episode-level cTnT is 0.08-0.12 ng/mL, then retain the >0.10 ng/mL definition in the remaining cohort.
-
-There are two supported ways to reproduce these analyses.
-
-**Option A: derive all cTnT label sets from a secure cTnT file.** Provide one or more cTnT measurements per pseudonymous ID; the evaluator uses the maximum value during the septic episode, which is equivalent to the manuscript rule of classifying a patient as positive when at least one value exceeds the cutoff.
-
-~~~bash
-export SICM_EXTERNAL_CTNT_CSV="/secure/path/external/ctnt_during_septic_episode.csv"
-export SICM_CTNT_ID_COLUMN="id"
-export SICM_CTNT_VALUE_COLUMN="ctnt_ng_ml"
-
-python scripts/evaluate_external_test_auc.py
+~~~text
+external_model_performance.csv
+full_model_predictions_with_labels.csv
+paired_primary_external_predictions.csv
+Figure4_DeLong_results.csv
+Supplementary_calibration_metrics.csv
+external_calibration_curve.csv
+external_calibration_curve.png / .pdf
+external_decision_curve.csv
+external_decision_curve.png / .pdf
+external_roc_comparison.png / .pdf
+sensitivity_ctnt_gt_0.20_predictions.csv
+sensitivity_exclude_0.08_to_0.12_predictions.csv
 ~~~
 
-**Option B: provide precomputed sensitivity-label files.**
-
-~~~bash
-export SICM_EXTERNAL_LABELS_020_CSV="/secure/path/external/id_label_ctnt_gt_020.csv"
-export SICM_EXTERNAL_LABELS_GRAY_EXCLUDED_CSV="/secure/path/external/id_label_exclude_008_012.csv"
-
-python scripts/evaluate_external_test_auc.py
-~~~
-
-If raw cTnT data and prepared label files are both supplied, the evaluator cross-checks their labels and stops on disagreement. The same full-model probability table is reused for all sensitivity analyses.
-
-The manuscript specifies a calibration curve with pointwise 95% confidence intervals and decision-curve analysis, but it does not state the calibration binning rule, the method used to construct the pointwise calibration intervals, or the exact DCA threshold grid. Repository defaults are 10 quantile calibration bins, pointwise percentile-bootstrap intervals using the same bootstrap iteration count/seed, and threshold probabilities 0.01-0.99 in 0.01 increments. These presentation settings can be changed with SICM_CALIBRATION_BINS, SICM_CALIBRATION_STRATEGY, SICM_DCA_MIN_THRESHOLD, SICM_DCA_MAX_THRESHOLD, and SICM_DCA_STEP without changing model predictions.
+Patient-level label and prediction files are analysis inputs/outputs and must remain outside version control.
 
 ## Research use
 
