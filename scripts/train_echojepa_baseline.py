@@ -455,259 +455,201 @@ print(
 
 
 # ============================================================
-# 7. SCAN MULTICENTER DATA
-# ============================================================
-
-def scan_videos(root):
-
-    records = []
-
-    seen_ids = set()
-
-    for center_folder in sorted(
-        root.iterdir()
-    ):
-
-        if not center_folder.is_dir():
-            continue
-
-        if center_folder.name.lower() == "outcome":
-            continue
-
-        for id_folder in sorted(
-            center_folder.iterdir()
-        ):
-
-            if not id_folder.is_dir():
-                continue
-
-            npy_files = sorted(
-                id_folder.glob(
-                    "*.npy"
-                )
-            )
-
-            if len(
-                npy_files
-            ) == 0:
-                continue
-
-            if len(
-                npy_files
-            ) != 1:
-
-                raise RuntimeError(
-                    "Each ID folder must contain exactly one NPY file.\n"
-                    f"Folder: {id_folder}\n"
-                    f"Files: {[p.name for p in npy_files]}"
-                )
-
-            sample_id = str(
-                id_folder.name
-            ).strip()
-
-            if sample_id in seen_ids:
-
-                raise RuntimeError(
-                    f"Duplicate ID across centers: {sample_id}"
-                )
-
-            seen_ids.add(
-                sample_id
-            )
-
-            records.append(
-                {
-                    "id":
-                        sample_id,
-
-                    "video_path":
-                        str(
-                            npy_files[
-                                0
-                            ]
-                        ),
-                }
-            )
-
-    df = pd.DataFrame(
-        records
-    )
-
-    if df.empty:
-
-        raise RuntimeError(
-            f"No training NPY videos found under:\n{root}"
-        )
-
-    return df
-
-
-video_df = scan_videos(
-    VIDEO_ROOT
-)
-
-
-# ============================================================
-# 8. LOAD LABELS
+# 7. LOAD ID/LABEL TABLE AND MATCH EXACT ID-NAMED NPY FILES
+#
+# Match the full-model development input convention:
+#   - label.csv contains exactly two columns: id and label
+#   - search VIDEO_ROOT recursively for files named exactly <id>.npy
+#   - only IDs listed in label.csv are used
+#   - every labeled ID must have exactly one matching NPY file
 # ============================================================
 
 label_df = pd.read_csv(
     LABEL_CSV,
     dtype=str,
+    keep_default_na=False,
+    encoding="utf-8-sig",
 )
 
-if label_df.shape[
-    1
-] < 2:
-
-    raise RuntimeError(
-        "label.csv must contain at least two columns."
-    )
-
-
-label_df = (
-    label_df.iloc[
-        :,
-        :2
-    ]
-    .copy()
-)
-
-label_df.columns = [
-    "id",
-    "label",
+normalized_columns = [
+    str(column).strip().lower()
+    for column in label_df.columns
 ]
 
-label_df[
-    "id"
-] = (
-    label_df[
-        "id"
-    ]
-    .astype(
-        str
+if (
+    len(normalized_columns) != 2
+    or normalized_columns.count("id") != 1
+    or normalized_columns.count("label") != 1
+):
+    raise RuntimeError(
+        "label.csv must contain exactly two columns named 'id' and 'label'. "
+        f"Current columns: {list(label_df.columns)}"
     )
-    .str.strip()
-)
 
-label_df[
-    "label"
-] = pd.to_numeric(
-    label_df[
-        "label"
-    ],
+label_df.columns = normalized_columns
+label_df = label_df[["id", "label"]].copy()
+label_df["id"] = label_df["id"].astype(str).str.strip()
+label_df["label"] = pd.to_numeric(
+    label_df["label"].astype(str).str.strip(),
     errors="coerce",
 )
 
+if label_df["id"].eq("").any():
+    raise RuntimeError("label.csv contains an empty ID value.")
 
-# Check conflicting labels.
-label_conflict = (
-    label_df[
-        label_df[
-            "label"
-        ].isin(
-            [
-                0,
-                1,
-            ]
-        )
-    ]
-    .groupby(
-        "id"
-    )[
-        "label"
-    ]
+conflicts = (
+    label_df[label_df["label"].isin([0, 1])]
+    .groupby("id")["label"]
     .nunique()
 )
+conflicts = conflicts[conflicts > 1]
 
-label_conflict = label_conflict[
-    label_conflict
-    > 1
-]
-
-if not label_conflict.empty:
-
+if not conflicts.empty:
+    conflict_path = OUTPUT_DIR / "id_label_conflicts.csv"
+    conflicts.to_csv(
+        conflict_path,
+        encoding="utf-8-sig",
+    )
     raise RuntimeError(
-        "Conflicting labels were found for some IDs."
+        f"{len(conflicts)} IDs have conflicting labels. "
+        f"Please check: {conflict_path}"
     )
 
-
 label_df = label_df.drop_duplicates(
-    subset=[
-        "id"
-    ],
+    subset=["id"],
     keep="first",
 )
 
 
-train_df = video_df.merge(
-    label_df,
+def scan_videos(root, label_ids):
+    """Find one exact <ID>.npy file for each labeled ID; ignore everything else."""
+
+    expected_ids = {
+        str(sample_id).strip()
+        for sample_id in label_ids
+        if str(sample_id).strip()
+    }
+    paths_by_id = {
+        sample_id: []
+        for sample_id in expected_ids
+    }
+    output_dir = OUTPUT_DIR.resolve()
+
+    for path in root.rglob("*.npy"):
+        if path.name.endswith(".tmp.npy"):
+            continue
+
+        relative_parts = path.relative_to(root).parts
+        if any(part.lower() == "outcome" for part in relative_parts):
+            continue
+
+        try:
+            path.resolve().relative_to(output_dir)
+        except ValueError:
+            pass
+        else:
+            continue
+
+        sample_id = path.stem.strip()
+        if sample_id in paths_by_id:
+            paths_by_id[sample_id].append(path)
+
+    duplicate_rows = [
+        {
+            "id": sample_id,
+            "video_path": str(path),
+        }
+        for sample_id, paths in paths_by_id.items()
+        if len(paths) > 1
+        for path in sorted(paths)
+    ]
+
+    if duplicate_rows:
+        duplicate_path = OUTPUT_DIR / "duplicate_id_npy_files.csv"
+        pd.DataFrame(duplicate_rows).to_csv(
+            duplicate_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+        raise RuntimeError(
+            "More than one exact ID-named NPY file was found for at least "
+            "one labeled ID. Keep one <id>.npy per ID. Details: "
+            f"{duplicate_path}"
+        )
+
+    records = [
+        {
+            "id": sample_id,
+            "video_path": str(paths[0]),
+        }
+        for sample_id, paths in sorted(paths_by_id.items())
+        if len(paths) == 1
+    ]
+    return pd.DataFrame(records, columns=["id", "video_path"])
+
+
+video_df = scan_videos(
+    VIDEO_ROOT,
+    label_df["id"].tolist(),
+)
+
+print("\nID-named NPY files matched:", len(video_df))
+
+full_df = label_df.merge(
+    video_df,
     on="id",
     how="left",
+    indicator=True,
 )
 
+matched_mask = full_df["_merge"] == "both"
+n_matched = int(matched_mask.sum())
+n_missing = int((~matched_mask).sum())
 
-train_df = train_df[
-    train_df[
-        "label"
-    ].isin(
-        [
-            0,
-            1,
-        ]
+print("IDs with matching <id>.npy :", n_matched)
+print("IDs without matching file  :", n_missing)
+
+if n_missing > 0:
+    missing_path = OUTPUT_DIR / "ids_without_matching_npy.csv"
+    full_df.loc[
+        ~matched_mask,
+        ["id", "label"],
+    ].to_csv(
+        missing_path,
+        index=False,
+        encoding="utf-8-sig",
     )
-].copy()
+    raise RuntimeError(
+        "Training stopped because each labeled ID must have one matching "
+        f"<id>.npy file. Missing IDs are listed in: {missing_path}"
+    )
 
-
-train_df[
-    "label"
-] = train_df[
-    "label"
-].astype(
-    int
+train_df = (
+    full_df.loc[
+        matched_mask & full_df["label"].isin([0, 1]),
+        ["id", "video_path", "label"],
+    ]
+    .copy()
 )
 
+train_df["label"] = train_df["label"].astype(int)
 
 if train_df.empty:
+    raise RuntimeError("No labeled videos were matched.")
 
-    raise RuntimeError(
-        "No labeled videos were matched."
-    )
-
-
-if train_df[
-    "label"
-].nunique() != 2:
-
-    raise RuntimeError(
-        "Both label=0 and label=1 are required."
-    )
-
+if train_df["label"].nunique() != 2:
+    raise RuntimeError("Both label=0 and label=1 are required.")
 
 train_df.to_csv(
-    OUTPUT_DIR
-    / "training_ids.csv",
+    OUTPUT_DIR / "training_ids.csv",
     index=False,
     encoding="utf-8-sig",
 )
 
-
+print("\nTraining IDs:", len(train_df))
+print("\nLabel distribution:")
 print(
-    "\nTraining IDs:",
-    len(
-        train_df
-    )
-)
-
-print(
-    "\nLabel distribution:"
-)
-
-print(
-    train_df[
-        "label"
-    ]
+    train_df["label"]
     .value_counts()
     .sort_index()
 )
