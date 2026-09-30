@@ -18,6 +18,9 @@ Raw echocardiographic NPY
 
 Important
 ---------
+- This file supports only the final locked physiology-informed architecture
+  saved by scripts/train.py. Historical model variants are intentionally not
+  supported.
 - No label file is read.
 - No AUC/accuracy is calculated.
 - No random augmentation is applied.
@@ -164,7 +167,6 @@ MIL_ATTENTION_DIM = 128
 
 CYCLE_FORWARD_CHUNK_SIZE = 1
 
-USE_LVEF_AUXILIARY = False
 
 ECHOJEPA_MEAN = torch.tensor(
     [
@@ -1214,13 +1216,7 @@ def build_echojepa_vitl():
 
 
 # ============================================================
-# 9. SPATIAL ATTENTION
-#
-# phase_aware=False:
-#     matches the earlier model that produced the ~0.981 train AUC.
-#
-# phase_aware=True:
-#     matches the newer model with explicit cardiac-phase embeddings.
+# 9. PHASE-AWARE SPATIAL ATTENTION
 # ============================================================
 
 class SpatialAttentionPool(
@@ -1229,29 +1225,22 @@ class SpatialAttentionPool(
 
     def __init__(
         self,
-        phase_aware,
     ):
 
         super().__init__()
-
-        self.phase_aware = (
-            phase_aware
-        )
 
         self.input_norm = nn.LayerNorm(
             FEATURE_DIM
         )
 
-        if self.phase_aware:
-
-            self.temporal_pos = nn.Parameter(
-                torch.zeros(
-                    1,
-                    TEMPORAL_TOKENS,
-                    1,
-                    FEATURE_DIM,
-                )
+        self.temporal_pos = nn.Parameter(
+            torch.zeros(
+                1,
+                TEMPORAL_TOKENS,
+                1,
+                FEATURE_DIM,
             )
+        )
 
         self.score = nn.Sequential(
             nn.Linear(
@@ -1274,18 +1263,16 @@ class SpatialAttentionPool(
             tokens
         )
 
-        if self.phase_aware:
-
-            normalized = (
-                normalized
-                + self.temporal_pos.to(
-                    dtype=normalized.dtype,
-                    device=normalized.device,
-                )
+        score_input = (
+            normalized
+            + self.temporal_pos.to(
+                dtype=normalized.dtype,
+                device=normalized.device,
             )
+        )
 
         scores = self.score(
-            normalized
+            score_input
         )
 
         weights = torch.softmax(
@@ -1308,7 +1295,7 @@ class SpatialAttentionPool(
 
 
 # ============================================================
-# 10. TEMPORAL ATTENTION
+# 10. PHASE-AWARE TEMPORAL ATTENTION
 # ============================================================
 
 class TemporalAttentionPool(
@@ -1317,28 +1304,21 @@ class TemporalAttentionPool(
 
     def __init__(
         self,
-        phase_aware,
     ):
 
         super().__init__()
-
-        self.phase_aware = (
-            phase_aware
-        )
 
         self.input_norm = nn.LayerNorm(
             FEATURE_DIM
         )
 
-        if self.phase_aware:
-
-            self.temporal_pos = nn.Parameter(
-                torch.zeros(
-                    1,
-                    TEMPORAL_TOKENS,
-                    FEATURE_DIM,
-                )
+        self.temporal_pos = nn.Parameter(
+            torch.zeros(
+                1,
+                TEMPORAL_TOKENS,
+                FEATURE_DIM,
             )
+        )
 
         self.temporal_attention = (
             nn.MultiheadAttention(
@@ -1393,15 +1373,13 @@ class TemporalAttentionPool(
             x
         )
 
-        if self.phase_aware:
-
-            x = (
-                x
-                + self.temporal_pos.to(
-                    dtype=x.dtype,
-                    device=x.device,
-                )
+        x = (
+            x
+            + self.temporal_pos.to(
+                dtype=x.dtype,
+                device=x.device,
             )
+        )
 
         attention_output, _ = (
             self.temporal_attention(
@@ -1446,16 +1424,12 @@ class TemporalAttentionPool(
 
 
 # ============================================================
-# 11. LV-AREA ENCODERS
+# 11. FINAL LV-AREA PHYSIOLOGY ENCODER
 # ============================================================
 
-class LVAreaEncoderLegacy(
+class LVAreaEncoder(
     nn.Module
 ):
-
-    """
-    Matches the earlier trained Spatial-Attention model.
-    """
 
     def __init__(
         self,
@@ -1463,90 +1437,9 @@ class LVAreaEncoderLegacy(
 
         super().__init__()
 
-        self.curve_encoder = nn.Sequential(
-            nn.LayerNorm(
-                AREA_CURVE_POINTS
-            ),
-            nn.Linear(
-                AREA_CURVE_POINTS,
-                128,
-            ),
-            nn.GELU(),
-            nn.Dropout(
-                0.10
-            ),
-            nn.Linear(
-                128,
-                96,
-            ),
-            nn.GELU(),
-        )
-
-        self.physiology_encoder = nn.Sequential(
-            nn.LayerNorm(
-                5
-            ),
-            nn.Linear(
-                5,
-                32,
-            ),
-            nn.GELU(),
-        )
-
-        self.fusion = nn.Sequential(
-            nn.Linear(
-                96 + 32,
-                AREA_EMBED_DIM,
-            ),
-            nn.GELU(),
-            nn.LayerNorm(
-                AREA_EMBED_DIM
-            ),
-        )
-
-    def forward(
-        self,
-        area_curves,
-        physiology,
-    ):
-
-        curve_feature = self.curve_encoder(
-            area_curves
-        )
-
-        physiology_feature = (
-            self.physiology_encoder(
-                physiology
-            )
-        )
-
-        return self.fusion(
-            torch.cat(
-                [
-                    curve_feature,
-                    physiology_feature,
-                ],
-                dim=-1,
-            )
-        )
-
-
-class LVAreaEncoderDatasetNorm(
-    nn.Module
-):
-
-    """
-    Matches the newer phase-aware model.
-    """
-
-    def __init__(
-        self,
-    ):
-
-        super().__init__()
-
-        # Temporary initialization.
-        # The trained values are loaded from model_state_dict.
+        # Values are overwritten by the trained state_dict. Keeping them as
+        # buffers guarantees that external inference uses the training-derived
+        # feature-wise z-score constants.
         self.register_buffer(
             "phys_mean",
             torch.zeros(
@@ -1563,6 +1456,8 @@ class LVAreaEncoderDatasetNorm(
             )
         )
 
+        # The 64-point LV-area curve is already normalized by mean ED area.
+        # No per-cycle LayerNorm is applied.
         self.curve_encoder = nn.Sequential(
             nn.Linear(
                 AREA_CURVE_POINTS,
@@ -1697,7 +1592,7 @@ class CycleMILAttention(
 
 
 # ============================================================
-# 13. INFERENCE MODEL
+# 13. FINAL LOCKED INFERENCE MODEL
 # ============================================================
 
 class SICMInferenceModel(
@@ -1707,44 +1602,14 @@ class SICMInferenceModel(
     def __init__(
         self,
         backbone,
-        phase_aware,
-        dataset_phys_norm,
-        has_lvef_head,
     ):
 
         super().__init__()
 
-        self.backbone = (
-            backbone
-        )
-
-        self.spatial_pool = (
-            SpatialAttentionPool(
-                phase_aware=(
-                    phase_aware
-                )
-            )
-        )
-
-        self.temporal_pool = (
-            TemporalAttentionPool(
-                phase_aware=(
-                    phase_aware
-                )
-            )
-        )
-
-        if dataset_phys_norm:
-
-            self.area_encoder = (
-                LVAreaEncoderDatasetNorm()
-            )
-
-        else:
-
-            self.area_encoder = (
-                LVAreaEncoderLegacy()
-            )
+        self.backbone = backbone
+        self.spatial_pool = SpatialAttentionPool()
+        self.temporal_pool = TemporalAttentionPool()
+        self.area_encoder = LVAreaEncoder()
 
         self.cycle_fusion = nn.Sequential(
             nn.LayerNorm(
@@ -1765,10 +1630,8 @@ class SICMInferenceModel(
             ),
         )
 
-        self.mil_attention = (
-            CycleMILAttention(
-                CYCLE_FUSION_DIM
-            )
+        self.mil_attention = CycleMILAttention(
+            CYCLE_FUSION_DIM
         )
 
         self.classifier = nn.Sequential(
@@ -1788,25 +1651,6 @@ class SICMInferenceModel(
                 1,
             ),
         )
-
-        if has_lvef_head:
-
-            self.lvef_head = nn.Sequential(
-                nn.Linear(
-                    CYCLE_FUSION_DIM,
-                    128,
-                ),
-                nn.GELU(),
-                nn.Linear(
-                    128,
-                    1,
-                ),
-                nn.Sigmoid(),
-            )
-
-        else:
-
-            self.lvef_head = None
 
     @torch.no_grad()
     def encode_visual_cycles(
@@ -1834,10 +1678,8 @@ class SICMInferenceModel(
                 chunk
             )
 
-            spatial_grid = (
-                tokens_to_spatial_grid(
-                    tokens
-                )
+            spatial_grid = tokens_to_spatial_grid(
+                tokens
             )
 
             (
@@ -1871,28 +1713,22 @@ class SICMInferenceModel(
         physiology,
     ):
 
-        visual_feature = (
-            self.encode_visual_cycles(
-                cycles
-            )
+        visual_feature = self.encode_visual_cycles(
+            cycles
         )
 
-        area_feature = (
-            self.area_encoder(
-                area_curves,
-                physiology,
-            )
+        area_feature = self.area_encoder(
+            area_curves,
+            physiology,
         )
 
-        fused_cycle_feature = (
-            self.cycle_fusion(
-                torch.cat(
-                    [
-                        visual_feature,
-                        area_feature,
-                    ],
-                    dim=-1,
-                )
+        fused_cycle_feature = self.cycle_fusion(
+            torch.cat(
+                [
+                    visual_feature,
+                    area_feature,
+                ],
+                dim=-1,
             )
         )
 
@@ -1919,7 +1755,7 @@ class SICMInferenceModel(
 
 
 # ============================================================
-# 14. LOAD TRAINED FINAL MODEL
+# 14. LOAD THE SINGLE FINAL LOCKED MODEL
 # ============================================================
 
 def load_trained_model(
@@ -1941,7 +1777,7 @@ def load_trained_model(
             map_location="cpu",
         )
 
-    if (
+    if not (
         isinstance(
             checkpoint,
             dict,
@@ -1950,120 +1786,168 @@ def load_trained_model(
         in checkpoint
     ):
 
-        state_dict = checkpoint[
-            "model_state_dict"
+        raise RuntimeError(
+            "The external inference script requires the final_model.pt "
+            "dictionary written by scripts/train.py."
+        )
+
+    expected_metadata = {
+        "base_model":
+            "EchoJEPA ViT-L V-JEPA2 vitl-vmix22m-pt220-c55",
+
+        "architecture":
+            "EchoJEPA + phase-aware Spatial Attention + phase-aware Temporal Attention + LV-area physiology + multi-cycle MIL",
+
+        "num_frames":
+            NUM_FRAMES,
+
+        "image_size":
+            IMAGE_SIZE,
+
+        "patch_size":
+            PATCH_SIZE,
+
+        "tubelet_size":
+            TUBELET_SIZE,
+
+        "feature_dim":
+            FEATURE_DIM,
+
+        "temporal_tokens":
+            TEMPORAL_TOKENS,
+
+        "area_curve_points":
+            AREA_CURVE_POINTS,
+
+        "area_embed_dim":
+            AREA_EMBED_DIM,
+
+        "cycle_fusion_dim":
+            CYCLE_FUSION_DIM,
+
+        "cycle_definition":
+            "all adjacent LV-area ED-to-ED cycles",
+
+        "mil_aggregation":
+            "attention",
+
+        "physiology_normalization":
+            "training-set feature-wise z-score",
+
+        "area_curve_normalization":
+            "mean ED area normalization only; no per-cycle LayerNorm",
+
+        "cycle_classifier":
+            False,
+
+        "temporal_phase_embedding":
+            True,
+
+        "use_lvef_auxiliary":
+            False,
+    }
+
+    missing_metadata = [
+        key
+        for key in expected_metadata
+        if key not in checkpoint
+    ]
+
+    if missing_metadata:
+
+        raise RuntimeError(
+            "The checkpoint is missing required final-model metadata: "
+            + ", ".join(
+                missing_metadata
+            )
+        )
+
+    metadata_mismatch = []
+
+    for key, expected_value in expected_metadata.items():
+
+        observed_value = checkpoint[
+            key
         ]
 
-    else:
+        if observed_value != expected_value:
 
-        state_dict = checkpoint
+            metadata_mismatch.append(
+                f"{key}: observed={observed_value!r}, "
+                f"expected={expected_value!r}"
+            )
 
-    phase_aware = (
-        "spatial_pool.temporal_pos"
-        in state_dict
-        or
-        "temporal_pool.temporal_pos"
-        in state_dict
-    )
+    if metadata_mismatch:
 
-    dataset_phys_norm = (
-        "area_encoder.phys_mean"
-        in state_dict
-    )
-
-    has_lvef_head = any(
-        key.startswith(
-            "lvef_head."
+        raise RuntimeError(
+            "The checkpoint does not match the locked manuscript model:\n"
+            + "\n".join(
+                metadata_mismatch
+            )
         )
-        for key in state_dict.keys()
-    )
 
-    legacy_cycle_classifier = any(
-        key.startswith(
-            "cycle_classifier."
+    state_dict = checkpoint[
+        "model_state_dict"
+    ]
+
+    required_state_keys = {
+        "spatial_pool.temporal_pos",
+        "temporal_pool.temporal_pos",
+        "area_encoder.phys_mean",
+        "area_encoder.phys_std",
+    }
+
+    missing_state_keys = sorted(
+        required_state_keys
+        - set(
+            state_dict.keys()
         )
+    )
+
+    if missing_state_keys:
+
+        raise RuntimeError(
+            "The checkpoint is missing required final-architecture state keys: "
+            + ", ".join(
+                missing_state_keys
+            )
+        )
+
+    forbidden_prefixes = (
+        "cycle_classifier.",
+        "lvef_head.",
+    )
+
+    forbidden_state_keys = [
+        key
         for key in state_dict.keys()
-    )
+        if key.startswith(
+            forbidden_prefixes
+        )
+    ]
 
-    print(
-        "\nDetected checkpoint architecture:"
-    )
+    if forbidden_state_keys:
 
-    print(
-        "  phase-aware pooling       :",
-        phase_aware,
-    )
-
-    print(
-        "  dataset physiology z-score:",
-        dataset_phys_norm,
-    )
-
-    print(
-        "  legacy cycle classifier   :",
-        legacy_cycle_classifier,
-    )
-
-    backbone = build_echojepa_vitl()
+        raise RuntimeError(
+            "The checkpoint contains weights from an unsupported historical "
+            "architecture: "
+            + ", ".join(
+                forbidden_state_keys[
+                    :20
+                ]
+            )
+        )
 
     model = SICMInferenceModel(
-        backbone=backbone,
-        phase_aware=phase_aware,
-        dataset_phys_norm=(
-            dataset_phys_norm
-        ),
-        has_lvef_head=(
-            has_lvef_head
-        ),
+        backbone=build_echojepa_vitl()
     )
 
-    result = model.load_state_dict(
+    # Exact loading is deliberate: this publication-facing inference script
+    # must run only the architecture that produced the reported locked model.
+    model.load_state_dict(
         state_dict,
-        strict=False,
+        strict=True,
     )
-
-    allowed_unexpected = [
-        key
-        for key in result.unexpected_keys
-        if key.startswith(
-            "cycle_classifier."
-        )
-    ]
-
-    other_unexpected = [
-        key
-        for key in result.unexpected_keys
-        if key not in allowed_unexpected
-    ]
-
-    if result.missing_keys:
-
-        raise RuntimeError(
-            "Missing model keys:\n"
-            + "\n".join(
-                result.missing_keys[
-                    :30
-                ]
-            )
-        )
-
-    if other_unexpected:
-
-        raise RuntimeError(
-            "Unexpected model keys:\n"
-            + "\n".join(
-                other_unexpected[
-                    :30
-                ]
-            )
-        )
-
-    if allowed_unexpected:
-
-        print(
-            "Ignoring legacy cycle-classifier weights "
-            "because test output is study-level only."
-        )
 
     model = model.to(
         DEVICE
@@ -2074,6 +1958,10 @@ def load_trained_model(
     for parameter in model.parameters():
 
         parameter.requires_grad = False
+
+    print(
+        "\nLoaded locked final physiology-informed SICM model."
+    )
 
     return model
 
