@@ -1,105 +1,4 @@
 
-"""
-SICM multi-cycle EchoJEPA training pipeline with Spatial Attention Pooling
-(training-set only, no validation/test split).
-
-Base model
-----------
-EchoJEPA ViT-L/16:
-    vitl-vmix22m-pt220-c55.pt
-
-Main changes relative to the single-cycle version
---------------------------------------------------
-1. Every study contributes ALL detected adjacent ED-to-ED cardiac cycles.
-   A study is therefore represented as a bag of cycle instances.
-
-2. Multiple Instance Learning (MIL) aggregates cycle-level representations
-   into one study-level representation.
-
-3. EchoJEPA spatial tokens are aggregated with learnable Spatial Attention Pooling instead of mean pooling.
-
-4. Each cycle also carries an explicit LV-area physiological representation:
-       - resampled normalized LV area curve
-       - fractional area change
-       - systolic contraction slope
-       - diastolic filling slope
-       - cycle-length proxy
-       - ED endpoint mismatch
-
-   A small MLP converts these physiological inputs into an embedding, which
-   is fused with the EchoJEPA visual representation before MIL aggregation.
-
-Pipeline
---------
-Original A4C .npy
-    -> EchoNet-Dynamic DeepLabV3 LV segmentation
-    -> LV area-time curve
-    -> detect ALL adjacent ED1 -> ES -> ED2 cycles
-       (primary ED-peak detection; no cycle is generated when detection fails)
-    -> each cycle is resampled to 16 frames at 224x224
-    -> each LV-area cycle is resampled to a fixed-length 1D curve
-    -> Stage 1: physiology-aware three-view self-supervised adaptation
-         EchoJEPA ViT-L
-         + same-cycle masked latent prediction
-         + EMA target encoder
-         + same-ID cross-cycle representation consistency
-
-       For every anchor cycle A:
-           context view:
-               augmented + masked Cycle A
-
-           token target:
-               another augmentation of the SAME Cycle A
-
-           cycle target:
-               a DIFFERENT cardiac cycle from the SAME ID
-
-       The token-level JEPA objective therefore preserves local correspondence,
-       while the cycle-level objective learns invariance across real heartbeats
-       from the same heart. IDs with only one detected cycle still participate
-       in token-level JEPA but do not contribute cross-cycle consistency loss.
-    -> Stage 2: study-level supervised MIL fine-tuning
-         every study = multiple cardiac-cycle instances
-         each cycle:
-             EchoJEPA tokens
-             -> Spatial Attention Pooling
-             -> Temporal Attention
-             -> visual feature
-             + LV-area physiological embedding
-             -> fused cycle representation
-         cycle-level MIL attention
-             -> study-level representation
-             -> SICM / non-SICM classifier
-
-Training stages
----------------
-Stage A:
-    EchoJEPA frozen
-    Temporal Attention + LV-area encoder + fusion + MIL + classifier trainable
-
-Stage B:
-    last EchoJEPA Transformer blocks unfrozen
-    all downstream modules remain trainable
-
-Design notes
-------------
-1. There is no internal validation/test split. All label=0/1 internal studies
-   are used for supervised training.
-2. Training AUC is IN-SAMPLE and is not a generalization estimate.
-3. QC flags are recorded but never used to reject a cycle.
-4. If primary ED peak detection yields multiple cycles, ALL adjacent cycles are cached.
-5. If fewer than two ED peaks are detected, the study is marked ERROR and is
-   excluded from cycle-level training; no fallback interval is generated.
-6. During supervised MIL training, all cycles are used by default. If GPU memory
-   is insufficient, set TRAIN_MAX_CYCLES_PER_STUDY to a positive number; cycles
-   are then randomly sampled per epoch so different cycles are seen over time.
-7. External evaluation must use a separate locked test script.
-8. The optional LVEF auxiliary head is disabled by default and should only be
-   enabled when the label CSV truly contains a study-level LVEF column.
-
-Runtime paths are supplied through environment variables; see the repository README.
-"""
-
 
 
 import copy
@@ -136,10 +35,6 @@ from sklearn.metrics import (
 )
 
 from tqdm import tqdm
-
-
-
-
 
 
 def required_env_path(name):
@@ -181,17 +76,7 @@ CYCLE_ROOT.mkdir(parents=True, exist_ok=True)
 CYCLE_MANIFEST_PATH = OUTPUT_DIR / "multi_cycle_manifest.csv"
 
 
-
-
-
-
-
-
-
-
 QUICK_TEST = False
-
-
 
 
 FORCE_REPROCESS_CYCLES = True
@@ -214,10 +99,6 @@ TOTAL_CLS_EPOCHS = (
     STAGE_A_EPOCHS
     + STAGE_B_EPOCHS
 )
-
-
-
-
 
 
 SEED = 42
@@ -245,10 +126,6 @@ NUM_WORKERS = 0
 MANIFEST_FLUSH_EVERY = 50
 
 
-
-
-
-
 SEG_SIZE = 112
 SEG_BATCH_SIZE = 64
 
@@ -270,16 +147,6 @@ QC_MIN_AREA_EXCURSION_FRACTION = 0.06
 QC_MAX_ED_AREA_MISMATCH_FRACTION = 0.60
 
 SAVE_QC_PLOTS = True
-
-
-
-
-
-
-
-
-
-
 
 
 NUM_FRAMES = 16
@@ -327,14 +194,7 @@ ECHOJEPA_STD = torch.tensor(
 )
 
 
-
 USE_ACTIVATION_CHECKPOINTING = True
-
-
-
-
-
-
 
 
 SSL_BATCH_SIZE = 1
@@ -349,7 +209,6 @@ SSL_WEIGHT_DECAY = 0.05
 SSL_MASK_RATIO = 0.60
 
 
-
 SSL_UNFREEZE_LAST_N_BLOCKS = 4
 
 PREDICTOR_DIM = 256
@@ -360,26 +219,10 @@ EMA_START = 0.996
 EMA_END = 0.9999
 
 
-
-
-
-
-
 CYCLE_SSL_LOSS_WEIGHT = 0.25
 
 
-
-
-
-
-
-
-
 SSL_USE_UNMASKED_CONTEXT_FOR_CYCLE_LOSS = False
-
-
-
-
 
 
 CLS_BATCH_SIZE = 1
@@ -399,15 +242,9 @@ HEAD_LR = 1e-4
 CLS_WEIGHT_DECAY = 1e-3
 
 
-
 UNFREEZE_LAST_N_BLOCKS = 2
 
 USE_CLASS_POS_WEIGHT = True
-
-
-
-
-
 
 
 AREA_CURVE_POINTS = 64
@@ -422,39 +259,15 @@ CYCLE_FUSION_DIM = 512
 MIL_ATTENTION_DIM = 128
 
 
-
-
-
-
-
-
-
 TRAIN_MAX_CYCLES_PER_STUDY = 0
-
-
 
 
 CYCLE_FORWARD_CHUNK_SIZE = 1
 
 
-
-
-
-
-
-
 USE_LVEF_AUXILIARY = False
 LVEF_COLUMN = "lvef"
 LVEF_AUX_WEIGHT = 0.20
-
-
-
-
-
-
-
-
-
 
 
 AUG_BRIGHTNESS_PROB = 0.80
@@ -470,14 +283,8 @@ AUG_TRANSLATE_PROB = 0.50
 AUG_MAX_TRANSLATE = 8
 
 
-
-
 AUG_MAX_PHASE_ROLL = 0
 AUG_PHASE_ROLL_PROB = 0.50
-
-
-
-
 
 
 def seed_everything(seed):
@@ -489,10 +296,6 @@ def seed_everything(seed):
 
 
 seed_everything(SEED)
-
-
-
-
 
 
 print("=" * 80)
@@ -597,7 +400,6 @@ for _path, _description in [
         )
 
 
-
 if str(
     ECHOJEPA_REPO_DIR
 ) not in sys.path:
@@ -608,15 +410,6 @@ if str(
             ECHOJEPA_REPO_DIR
         ),
     )
-
-
-
-
-
-
-
-
-
 
 
 label_df = pd.read_csv(
@@ -675,7 +468,6 @@ label_df = label_df.drop_duplicates(subset=["id"], keep="first")
 
 
 def scan_videos(root, label_ids):
-    """Find one exact <ID>.npy file for each labeled ID; ignore everything else."""
 
     expected_ids = {
         str(sample_id).strip()
@@ -815,10 +607,6 @@ if labeled_df["label"].nunique() != 2:
     )
 
 
-
-
-
-
 def load_video_tchw(npy_path):
     array = np.asarray(np.load(npy_path, mmap_mode="r"))
 
@@ -875,13 +663,6 @@ def to_grayscale_255(x):
             gray = torch.zeros_like(gray)
 
     return gray.clamp(0, 255)
-
-
-
-
-
-
-
 
 
 def estimate_mean_std(dataframe, max_videos, frames_per_video):
@@ -948,10 +729,6 @@ DATA_MEAN, DATA_STD = estimate_mean_std(
 )
 
 
-
-
-
-
 def build_lv_segmenter(weight_path):
     print("\nBuilding EchoNet-Dynamic DeepLabV3-ResNet50 LV segmenter...")
 
@@ -1005,10 +782,6 @@ def build_lv_segmenter(weight_path):
 lv_model = build_lv_segmenter(LV_SEGMENTATION_CHECKPOINT)
 
 
-
-
-
-
 @torch.no_grad()
 def get_lv_area_curve(npy_path, segmenter):
     original = load_video_tchw(npy_path)
@@ -1027,13 +800,6 @@ def get_lv_area_curve(npy_path, segmenter):
         areas.append(masks.sum(dim=(1, 2)).cpu().numpy().astype(np.float32))
 
     return original, np.concatenate(areas)
-
-
-
-
-
-
-
 
 
 def robust_area_range(
@@ -1223,12 +989,6 @@ def detect_all_cycles(
     raw_area,
 ):
 
-    """
-    Return all adjacent ED-to-ED cycles found by primary ED-peak detection.
-
-    If fewer than two ED peaks are detected, raise an error. No alternate
-    detector or synthetic fallback interval is used.
-    """
 
     raw_area = np.asarray(
         raw_area,
@@ -1296,24 +1056,12 @@ def detect_all_cycles(
     }
 
 
-
-
-
-
 def resample_cycle(
     original_video,
     ed1,
     ed2,
 ):
 
-    """
-    Crop ED1..ED2 and resample to:
-
-        NUM_FRAMES x IMAGE_SIZE x IMAGE_SIZE
-
-    Output:
-        uint8 T,H,W
-    """
 
     ed1 = int(
         ed1
@@ -1404,24 +1152,6 @@ def build_lv_area_representation(
     ed2,
 ):
 
-    """
-    Create a fixed-length normalized LV-area curve plus explicit
-    physiological descriptors.
-
-    The curve is divided by the mean ED area, so ED is approximately 1.
-    This emphasizes relative contraction / filling rather than image zoom.
-
-    Explicit descriptors:
-        0. fractional area change
-        1. normalized systolic contraction slope
-        2. normalized diastolic filling slope
-        3. cycle-length proxy
-        4. relative ED endpoint mismatch
-
-    The cycle-length value is frame-based because the current NPY files do not
-    provide a per-study frame rate. If true FPS becomes available, replace this
-    proxy with duration in seconds.
-    """
 
     ed1 = int(
         ed1
@@ -1625,10 +1355,6 @@ def build_lv_area_representation(
     )
 
 
-
-
-
-
 def save_multicycle_qc(
     study_output,
     raw_area,
@@ -1816,13 +1542,6 @@ def save_multicycle_qc(
     )
 
 
-
-
-
-
-
-
-
 CYCLE_FILENAME_TEMPLATE = (
     "cycle_{cycle_index:02d}_"
     f"{NUM_FRAMES}f_{IMAGE_SIZE}px.npy"
@@ -2002,10 +1721,6 @@ def process_all_cycles(
         ]
 
         key = sample_id
-
-
-
-
 
 
         if (
@@ -2479,10 +2194,6 @@ if torch.cuda.is_available():
     torch.cuda.empty_cache()
 
 
-
-
-
-
 usable_df = full_df.merge(
     used_manifest[
         [
@@ -2506,7 +2217,6 @@ usable_df = full_df.merge(
     on="id",
     how="inner",
 )
-
 
 
 classification_df = usable_df[
@@ -2533,14 +2243,12 @@ classification_df[
 )
 
 
-
 ssl_df = (
     classification_df
     .reset_index(
         drop=True
     )
 )
-
 
 
 if USE_LVEF_AUXILIARY:
@@ -2683,21 +2391,6 @@ study_training_df.to_csv(
 )
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 PHYS_COLUMNS = [
     "fac",
     "systolic_slope",
@@ -2788,10 +2481,6 @@ for (
         f"mean={feature_mean:.6f}  "
         f"std={feature_std:.6f}"
     )
-
-
-
-
 
 
 def load_cached_cycle(
@@ -2936,9 +2625,6 @@ def augment_cycle(
     cycle,
 ):
 
-    """
-    Temporally consistent augmentation.
-    """
 
     if (
         AUG_MAX_PHASE_ROLL > 0
@@ -3092,33 +2778,10 @@ def load_area_curve(
     ).float()
 
 
-
-
-
-
 class CycleSSLDataset(
     Dataset
 ):
 
-    """
-    Three-view SSL dataset.
-
-    Anchor cycle A:
-        view_context:
-            augmentation of Cycle A; masking is applied later.
-
-        view_token_target:
-            an independent augmentation of the SAME Cycle A.
-            This preserves token-level correspondence for JEPA prediction.
-
-        view_cycle_target:
-            an augmentation of a DIFFERENT cycle from the SAME ID.
-            This creates a physiologically meaningful cross-cycle objective.
-
-    If an ID contains only one detected cycle:
-        - token-level JEPA is still used;
-        - cross-cycle consistency is skipped for that sample.
-    """
 
     def __init__(
         self,
@@ -3206,13 +2869,6 @@ class CycleSSLDataset(
         )
 
 
-
-
-
-
-
-
-
         view_context = (
             prepare_echojepa_input(
                 augment_cycle(
@@ -3228,9 +2884,6 @@ class CycleSSLDataset(
                 )
             )
         )
-
-
-
 
 
         candidate_indices = [
@@ -3264,7 +2917,6 @@ class CycleSSLDataset(
             has_cross_cycle = True
 
         else:
-
 
 
             target_cycle = anchor_cycle.clone()
@@ -3304,9 +2956,6 @@ class SICMMILStudyDataset(
     Dataset
 ):
 
-    """
-    One item = one ID = a bag of cardiac-cycle instances.
-    """
 
     def __init__(
         self,
@@ -3394,13 +3043,6 @@ class SICMMILStudyDataset(
         ) = self.groups[
             idx
         ]
-
-
-
-
-
-
-
 
 
         if (
@@ -3648,10 +3290,6 @@ def mil_collate_fn(
     batch,
 ):
 
-    """
-    CLS_BATCH_SIZE is intentionally 1 because each study contains a
-    variable number of cardiac cycles.
-    """
 
     if len(
         batch
@@ -3666,21 +3304,9 @@ def mil_collate_fn(
     ]
 
 
-
-
-
-
 def _choose_encoder_state_dict(
     checkpoint,
 ):
-
-    """
-    EchoJEPA / V-JEPA checkpoints may use different top-level names
-    depending on the training phase.
-
-    For V-JEPA 2 EchoJEPA, target_encoder is preferred because it is
-    the EMA representation used for downstream evaluation.
-    """
 
 
     if not isinstance(
@@ -3720,7 +3346,6 @@ def _choose_encoder_state_dict(
                 value,
                 key,
             )
-
 
 
     if all(
@@ -4100,40 +3725,10 @@ base_backbone = load_echojepa_vitl(
 )
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def tokens_to_spatial_grid(
     tokens,
 ):
 
-    """
-    Convert the EchoJEPA token sequence:
-
-        B, 1568, 1024
-
-    to:
-
-        B, 8, 196, 1024
-
-    where:
-
-        8   = temporal tubelet positions
-        196 = 14 x 14 spatial tokens
-
-    No spatial averaging is performed here.
-    """
 
     batch_size = (
         tokens.shape[0]
@@ -4160,20 +3755,6 @@ def tokens_to_spatial_grid(
     return tokens
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 class SpatialAttentionPool(
     nn.Module
 ):
@@ -4187,12 +3768,6 @@ class SpatialAttentionPool(
         self.input_norm = nn.LayerNorm(
             FEATURE_DIM
         )
-
-
-
-
-
-
 
 
         self.temporal_pos = nn.Parameter(
@@ -4227,18 +3802,9 @@ class SpatialAttentionPool(
     ):
 
 
-
-
-
-
-
-
         normalized = self.input_norm(
             tokens
         )
-
-
-
 
 
         score_input = (
@@ -4274,16 +3840,6 @@ class SpatialAttentionPool(
         )
 
 
-
-
-
-
-
-
-
-
-
-
 class TemporalAttentionPool(
     nn.Module
 ):
@@ -4297,13 +3853,6 @@ class TemporalAttentionPool(
         self.input_norm = nn.LayerNorm(
             FEATURE_DIM
         )
-
-
-
-
-
-
-
 
 
         self.temporal_pos = nn.Parameter(
@@ -4369,8 +3918,6 @@ class TemporalAttentionPool(
     ):
 
 
-
-
         x = self.input_norm(
             x
         )
@@ -4426,19 +3973,6 @@ class TemporalAttentionPool(
         )
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 def create_mask(
     batch_size,
     mask_ratio,
@@ -4489,19 +4023,6 @@ def apply_input_mask(
     clip,
     mask,
 ):
-
-    """
-    Zero masked patch/tubelet cells in normalized input space.
-
-    clip:
-        B, C, T, H, W
-
-    mask:
-        B, 1568
-
-    Zero after normalization corresponds approximately to a
-    mean-valued input rather than black pixels.
-    """
 
 
     batch_size = (
@@ -4639,8 +4160,6 @@ class LatentPredictor(
         )
 
 
-
-
         x = torch.where(
             mask.unsqueeze(
                 -1
@@ -4669,10 +4188,6 @@ class LatentPredictor(
         )
 
 
-
-
-
-
 def configure_ssl_trainable_blocks(
     encoder,
     n_blocks,
@@ -4686,7 +4201,6 @@ def configure_ssl_trainable_blocks(
         parameter.requires_grad = False
 
 
-
     for block in (
         encoder.blocks[
             -n_blocks:
@@ -4698,7 +4212,6 @@ def configure_ssl_trainable_blocks(
         ):
 
             parameter.requires_grad = True
-
 
 
     for parameter in (
@@ -4821,12 +4334,6 @@ class CycleAwareEchoJEPA(
     ):
 
 
-
-
-
-
-
-
         masked_view = apply_input_mask(
             view_context,
             mask,
@@ -4858,21 +4365,6 @@ class CycleAwareEchoJEPA(
         )
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         with torch.no_grad():
 
             token_target_tokens = (
@@ -4880,9 +4372,6 @@ class CycleAwareEchoJEPA(
                     view_token_target
                 )
             )
-
-
-
 
 
         predicted_masked = F.normalize(
@@ -4907,21 +4396,6 @@ class CycleAwareEchoJEPA(
                 token_target_masked,
             )
         )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
         has_cross_cycle = (
@@ -5035,7 +4509,6 @@ class CycleAwareEchoJEPA(
             )
 
 
-
             cross_cycle_positive_cosine = (
                 torch.zeros(
                     (),
@@ -5139,10 +4612,6 @@ class CycleAwareEchoJEPA(
                 target_buffer.data.copy_(
                     online_buffer.data
                 )
-
-
-
-
 
 
 ssl_dataset = (
@@ -5769,10 +5238,6 @@ torch.save(
 )
 
 
-
-
-
-
 classification_backbone = (
     ssl_model
     .context_backbone
@@ -5825,10 +5290,6 @@ if torch.cuda.is_available():
     torch.cuda.empty_cache()
 
 
-
-
-
-
 class LVAreaEncoder(
     nn.Module
 ):
@@ -5842,12 +5303,6 @@ class LVAreaEncoder(
         super().__init__()
 
 
-
-
-
-
-
-
         self.register_buffer(
             "phys_mean",
             phys_mean.clone()
@@ -5857,16 +5312,6 @@ class LVAreaEncoder(
             "phys_std",
             phys_std.clone()
         )
-
-
-
-
-
-
-
-
-
-
 
 
         self.curve_encoder = nn.Sequential(
@@ -5886,11 +5331,6 @@ class LVAreaEncoder(
         )
 
 
-
-
-
-
-
         self.physiology_encoder = nn.Sequential(
             nn.Linear(
                 5,
@@ -5898,7 +5338,6 @@ class LVAreaEncoder(
             ),
             nn.GELU(),
         )
-
 
 
         self.fusion = nn.Sequential(
@@ -5949,10 +5388,6 @@ class LVAreaEncoder(
         )
 
 
-
-
-
-
 class CycleMILAttention(
     nn.Module
 ):
@@ -5985,8 +5420,6 @@ class CycleMILAttention(
     ):
 
 
-
-
         logits = (
             self.score(
                 cycle_features
@@ -6013,10 +5446,6 @@ class CycleMILAttention(
             study_feature,
             weights,
         )
-
-
-
-
 
 
 class SICMMultiCycleMILClassifier(
@@ -6134,24 +5563,6 @@ class SICMMultiCycleMILClassifier(
         cycles,
     ):
 
-        """
-        Encode every cardiac cycle:
-
-            EchoJEPA tokens
-                -> Spatial Attention Pooling
-                -> Temporal Attention
-                -> cycle visual feature
-
-        Returns:
-            visual_features:
-                N_cycles, 1024
-
-            spatial_attention:
-                N_cycles, 8, 196
-
-            temporal_attention:
-                N_cycles, 8
-        """
 
         visual_features = []
 
@@ -6343,10 +5754,6 @@ classifier = (
 )
 
 
-
-
-
-
 if (
     CLS_BATCH_SIZE
     != 1
@@ -6460,10 +5867,6 @@ lvef_criterion = (
 )
 
 
-
-
-
-
 def freeze_backbone(
     model,
 ):
@@ -6544,10 +5947,6 @@ def print_trainable_parameters(
         f"Trainable percentage : "
         f"{100 * trainable / max(total, 1):.2f}%"
     )
-
-
-
-
 
 
 @torch.no_grad()
@@ -6727,7 +6126,6 @@ def evaluate_training_set(
                         ]
                     ),
             }
-
 
 
             cycle_spatial = (
@@ -6955,10 +6353,6 @@ def evaluate_training_set(
                 axis=0,
             ),
     }
-
-
-
-
 
 
 freeze_backbone(
@@ -7215,10 +6609,6 @@ cls_scaler = torch.amp.GradScaler(
     DEVICE_TYPE,
     enabled=AMP_ENABLED,
 )
-
-
-
-
 
 
 CHECKPOINT_PATH = (
@@ -7781,10 +7171,6 @@ for epoch in range(
     )
 
 
-
-
-
-
 torch.save(
     {
         "model_state_dict":
@@ -7887,10 +7273,6 @@ print(
 )
 
 
-
-
-
-
 final_metrics = (
     evaluate_training_set(
         classifier,
@@ -7936,15 +7318,6 @@ final_metrics[
 )
 
 
-
-
-
-
-
-
-
-
-
 np.save(
     OUTPUT_DIR
     / "train_spatial_attention.npy",
@@ -7952,10 +7325,6 @@ np.save(
         "spatial_attention"
     ],
 )
-
-
-
-
 
 
 fpr, tpr, _ = roc_curve(
@@ -8033,10 +7402,6 @@ plt.savefig(
 plt.close()
 
 
-
-
-
-
 print(
     "\n"
     + "=" * 80
@@ -8069,8 +7434,6 @@ print(
         video_df
     ),
 )
-
-
 
 
 print(
