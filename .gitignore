@@ -216,3 +216,38 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local research data, predictions, and model assets: never version these files.
+.env.*
+!.env.example
+/data/
+**/data/
+/outputs/
+**/outputs/
+/checkpoints/
+**/checkpoints/
+/runs/
+**/runs/
+wandb/
+*.npy
+*.npz
+*.csv
+*.dcm
+*.dicom
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.model
+*.tar
+*.tar.gz
+*.zip
