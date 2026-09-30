@@ -1,15 +1,4 @@
 
-"""
-SICM one-click pipeline:
-raw A4C NPY -> LV segmentation -> ED-to-ED cycles -> patient-level 5-fold CV
-
-label.csv must contain:
-    id,label
-
-One id = one patient.
-Every fold starts from the original EchoJEPA checkpoint, not the previously
-trained SICM final_model.pt.
-"""
 
 import copy
 import gc
@@ -40,10 +29,6 @@ from sklearn.metrics import (
     f1_score, precision_score, brier_score_loss,
 )
 from tqdm import tqdm
-
-
-
-
 
 
 def required_env_path(name):
@@ -91,18 +76,10 @@ for output_path in [OUTPUT_ROOT, PREPROCESS_DIR, CV_DIR]:
     output_path.mkdir(parents=True, exist_ok=True)
 
 
-
-
-
-
 FORCE_REPROCESS_CYCLES = True
 
 
-
-
-
 QUICK_TEST = False
-
 
 
 RUN_ONLY_FOLD = None
@@ -115,10 +92,6 @@ else:
     SSL_EPOCHS, STAGE_A_EPOCHS, STAGE_B_EPOCHS = 10, 10, 20
 
 TOTAL_CLS_EPOCHS = STAGE_A_EPOCHS + STAGE_B_EPOCHS
-
-
-
-
 
 
 SEED = 42
@@ -225,10 +198,6 @@ if DEVICE_TYPE == "cuda":
     print("GPU           :", torch.cuda.get_device_name(0))
 
 
-
-
-
-
 EXCLUDED = {
     "outcome", "outputs", "cycles", "preprocessing", "cross_validation",
     "echojepa", "base", "__pycache__", OUTPUT_ROOT.name.lower(),
@@ -241,7 +210,6 @@ def excluded_path(path):
 
 
 def scan_raw_videos(root, expected_ids):
-    """Find one exact <ID>.npy for each labeled ID; ignore all other files."""
     paths_by_id = {str(sample_id).strip(): [] for sample_id in expected_ids}
 
     for path in sorted(root.rglob("*.npy")):
@@ -312,10 +280,6 @@ full_df = video_df.merge(label_df[["id", "label"]], on="id", how="inner")
 
 print("Raw videos:", len(full_df))
 print(full_df["label"].value_counts().sort_index())
-
-
-
-
 
 
 def load_video_tchw(path):
@@ -409,10 +373,6 @@ def estimate_seg_normalization(df, save_path=None):
     return mean, std
 
 
-
-
-
-
 def build_lv_segmenter(path):
     try:
         model = torchvision.models.segmentation.deeplabv3_resnet50(
@@ -468,10 +428,6 @@ def lv_area_curve(path, model, mean, std):
         )
 
     return original, np.concatenate(areas)
-
-
-
-
 
 
 def robust_range(x):
@@ -638,10 +594,6 @@ def save_qc(folder, raw_area, detection):
     plt.close(fig)
 
 
-
-
-
-
 MANIFEST_COLUMNS = [
     "id", "video_path", "status", "cycle_index", "n_cycles_in_study",
     "method", "original_frames", "ed1", "es", "ed2", "cycle_frames",
@@ -654,7 +606,6 @@ MANIFEST_COLUMNS = [
 
 
 def preprocess_all(df, normalization_fit_df, fold_dir):
-    """Extract cycles using normalization fitted only on this fold's train videos."""
     preprocessing_dir = fold_dir / "preprocessing"
     cycle_root = preprocessing_dir / "cycles"
     cycle_manifest = preprocessing_dir / "multi_cycle_manifest.csv"
@@ -837,10 +788,6 @@ print("\nPatients entering fold assignment:", len(patient_df))
 print(patient_df["label"].value_counts().sort_index())
 
 
-
-
-
-
 def load_cached_cycle(path):
     arr = np.load(path)
 
@@ -916,10 +863,6 @@ def load_area_curve(path):
     if x.shape != (AREA_CURVE_POINTS,):
         raise ValueError(f"Bad LV area curve shape: {x.shape}")
     return torch.from_numpy(x.copy()).float()
-
-
-
-
 
 
 class CycleSSLDataset(Dataset):
@@ -1041,10 +984,6 @@ def mil_collate(batch):
     return batch[0]
 
 
-
-
-
-
 def choose_encoder_state(ckpt):
     if not isinstance(ckpt, dict):
         return ckpt, "root"
@@ -1133,10 +1072,6 @@ def load_echojepa():
 
     encoder.load_state_dict(matched, strict=False)
     return encoder
-
-
-
-
 
 
 def token_grid(tokens):
@@ -1402,10 +1337,6 @@ class CycleAwareEchoJEPA(nn.Module):
                 )
 
 
-
-
-
-
 class LVAreaEncoder(nn.Module):
     def __init__(self, mean, std):
         super().__init__()
@@ -1564,10 +1495,6 @@ def unfreeze_last_blocks(model):
         p.requires_grad = True
 
 
-
-
-
-
 def metrics_from_prob(y, p):
     y = np.asarray(y, dtype=int)
     p = np.asarray(p, dtype=float)
@@ -1676,10 +1603,6 @@ def bootstrap_auc_ci(y, p, n_bootstrap=2000):
     )
 
 
-
-
-
-
 skf = StratifiedKFold(
     n_splits=N_SPLITS,
     shuffle=True,
@@ -1708,10 +1631,6 @@ patient_df.to_csv(
     .reset_index()
     .to_csv(CV_DIR / "fold_distribution.csv", index=False)
 )
-
-
-
-
 
 
 def train_ssl(train_cycle_df, fold_dir):
@@ -1885,10 +1804,6 @@ def train_ssl(train_cycle_df, fold_dir):
         torch.cuda.empty_cache()
 
     return backbone, spatial_pool, temporal_pool
-
-
-
-
 
 
 PHYS_COLUMNS = [
@@ -2335,10 +2250,6 @@ def train_one_fold(fold):
     return val_pred, metrics
 
 
-
-
-
-
 folds = (
     list(range(1, N_SPLITS + 1))
     if RUN_ONLY_FOLD is None
@@ -2371,10 +2282,6 @@ if validation_failure_parts:
     pd.concat(validation_failure_parts, ignore_index=True).to_csv(
         CV_DIR / "validation_preprocessing_failures.csv", index=False
     )
-
-
-
-
 
 
 if RUN_ONLY_FOLD is not None:
