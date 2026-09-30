@@ -39,9 +39,9 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 
-# ============================================================
-# 0. PATHS
-# ============================================================
+
+
+
 
 def required_env_path(name):
 
@@ -94,9 +94,9 @@ OUTPUT_CSV.parent.mkdir(
 )
 
 
-# ============================================================
-# 1. SETTINGS
-# ============================================================
+
+
+
 
 DEVICE = torch.device(
     "cuda"
@@ -157,9 +157,9 @@ ECHOJEPA_STD = torch.tensor(
 )
 
 
-# ============================================================
-# 2. STARTUP CHECKS
-# ============================================================
+
+
+
 
 for path, description in [
     (
@@ -196,9 +196,9 @@ if str(
     )
 
 
-# ============================================================
-# 3. VIDEO PREPROCESSING
-# ============================================================
+
+
+
 
 def load_video_tchw(
     npy_path,
@@ -213,7 +213,7 @@ def load_video_tchw(
 
     if array.ndim == 3:
 
-        # T,H,W
+
         x = (
             torch.from_numpy(
                 array.copy()
@@ -234,7 +234,7 @@ def load_video_tchw(
         )
     ):
 
-        # T,H,W,C
+
         x = (
             torch.from_numpy(
                 array.copy()
@@ -258,7 +258,7 @@ def load_video_tchw(
         )
     ):
 
-        # T,C,H,W
+
         x = (
             torch.from_numpy(
                 array.copy()
@@ -432,7 +432,7 @@ def prepare_input(
         align_corners=False,
     )
 
-    # T,1,H,W -> T,3,H,W
+
     video = video.repeat(
         1,
         3,
@@ -459,7 +459,7 @@ def prepare_input(
         - mean
     ) / std
 
-    # T,C,H,W -> 1,C,T,H,W
+
     return (
         video
         .permute(
@@ -475,9 +475,9 @@ def prepare_input(
     )
 
 
-# ============================================================
-# 4. BUILD EchoJEPA ViT-L ARCHITECTURE
-# ============================================================
+
+
+
 
 def build_echojepa_vitl():
 
@@ -526,9 +526,9 @@ def build_echojepa_vitl():
     return encoder
 
 
-# ============================================================
-# 5. PURE BASELINE MODEL
-# ============================================================
+
+
+
 
 class EchoJEPABaselineClassifier(
     nn.Module
@@ -605,9 +605,9 @@ class EchoJEPABaselineClassifier(
         )
 
 
-# ============================================================
-# 6. LOAD TRAINED MODEL
-# ============================================================
+
+
+
 
 checkpoint = torch.load(
     MODEL_PATH,
@@ -688,9 +688,9 @@ for parameter in model.parameters():
     parameter.requires_grad = False
 
 
-# ============================================================
-# 7. FIND TEST NPY FILES
-# ============================================================
+
+
+
 
 npy_paths = sorted(
     [
@@ -717,8 +717,8 @@ if len(
     )
 
 
-# External prediction IDs are the immediate parent directory names.
-# Require exactly one selected A4C NPY per pseudonymous ID.
+
+
 paths_by_id = {}
 
 for path in npy_paths:
@@ -793,8 +793,8 @@ print(
 )
 
 
-# ============================================================
-# 8. TEST INFERENCE# ============================================================
+
+
 
 records = []
 
@@ -926,9 +926,9 @@ for npy_path in tqdm(
         )
 
 
-# ============================================================
-# 9. SAVE RESULTS
-# ============================================================
+
+
+
 
 result_df = pd.DataFrame(
     records
