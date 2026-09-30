@@ -148,6 +148,8 @@ export SICM_EXTERNAL_OUTPUT_CSV="outputs/external/physiology_informed_test_predi
 python scripts/infer_external.py
 ~~~
 
+The full-model inference script accepts only the final locked manuscript architecture produced by `scripts/train.py`: phase-aware spatial attention, phase-aware temporal attention, training-derived physiology z-score buffers, LV-area physiology, and multi-cycle MIL. It validates the saved checkpoint metadata and then loads the complete model state with `strict=True`; historical non-phase-aware, legacy-physiology, cycle-classifier, or LVEF-auxiliary variants are intentionally rejected.
+
 The full-model prediction CSV includes the pseudonymous ID, input filename/path relative to the configured external-video root, number of cycles, SICM probability, a 0.5-threshold prediction, and a success/error status. Cycle extraction uses the primary ED-peak rule and does not add relaxed or fallback detection. The predictions are patient-level output and must not be committed.
 
 ### EchoJEPA baseline inference
