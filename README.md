@@ -23,15 +23,15 @@ This repository contains the supplied training, patient-level cross-validation, 
 `-- LICENSE
 ~~~
 
-The six scripts were reorganized from the supplied source files. Local paths and output destinations were made environment-configurable. The patient-level CV source fits segmentation normalization within each training fold, and external inference uses the same primary ED-peak detector as development.
+The six scripts were reorganized from the supplied source files. Local paths and output destinations were made environment-configurable. The patient-level CV source fits segmentation normalization within each training fold. The physiology-informed model uses primary ED-peak cycle detection, whereas the direct EchoJEPA baseline deliberately uses no LV segmentation or cardiac-cycle extraction.
 
 ## Workflow
 
 1. **Train the physiology-informed model** with scripts/train.py. It performs self-supervised adaptation followed by supervised two-stage patient-level MIL training. Its training metrics are in-sample.
-2. **Train the direct EchoJEPA baseline** with scripts/train_echojepa_baseline.py. It uses the same cycle extraction, then averages EchoJEPA cycle features before an MLP classifier. Its training metrics are also in-sample.
+2. **Train the direct EchoJEPA baseline** with scripts/train_echojepa_baseline.py. It uniformly samples 16 frames from each complete cine loop, applies EchoJEPA ViT-L, globally averages all spatiotemporal tokens, and uses an MLP classifier. It contains no LV segmentation, ED/ES detection, cardiac-cycle alignment, physiology branch, attention pooling, or MIL. Its training metrics are in-sample.
 3. **Run internal validation** with scripts/cross_validate_patient_5fold.py. It assigns IDs to stratified patient folds, fits segmentation normalization on each training fold, and writes OOF predictions plus preprocessing-failure records.
-4. **Run both external inference scripts** with scripts/infer_external.py and scripts/infer_echojepa_baseline.py. Each loads its locked model and training-derived segmentation normalization, reads no labels, and writes probabilities by pseudonymous ID.
-5. **Evaluate external predictions** with scripts/evaluate_external_test_auc.py. It joins prepared binary labels to the full-model and baseline predictions. One label definition is evaluated per invocation; prepare separate label files for the primary and sensitivity definitions.
+4. **Run both external inference scripts** with scripts/infer_external.py and scripts/infer_echojepa_baseline.py. The physiology-informed model loads its training-derived LV-segmentation normalization; the direct EchoJEPA baseline does not use LV segmentation. Neither script reads labels or updates model weights.
+5. **Evaluate external predictions** with scripts/evaluate_external_test_auc.py. It reads the primary and two prespecified sensitivity-analysis label CSVs in the same run and reuses the locked model probabilities.
 
 Clinical cohort construction, Sepsis-3 identification, cardiac exclusion rules, time-window selection, and SICM reference-label derivation are outside the supplied scripts. Prepare those inputs under the applicable data-access and governance rules. Do not place data or labels in this repository.
 
@@ -95,7 +95,7 @@ The final model is written to outputs/full_model/final_model.pt; the segmentatio
 
 ## Direct EchoJEPA baseline training
 
-Use the same development videos, binary labels, EchoJEPA initialization, and LV-segmentation checkpoint as the full model:
+Use the same development videos, binary labels, and EchoJEPA initialization as the full model. The baseline does **not** use the EchoNet-Dynamic LV-segmentation model.
 
 ~~~bash
 export SICM_VIDEO_ROOT="/secure/path/development/videos"
@@ -103,13 +103,16 @@ export SICM_LABEL_CSV="/secure/path/development/id_label.csv"
 export SICM_CHECKPOINT_DIR="checkpoints"
 export ECHOJEPA_REPO_DIR="checkpoints/EchoJEPA"
 export ECHOJEPA_CHECKPOINT="checkpoints/vitl-vmix22m-pt220-c55.pt"
-export LV_SEGMENTATION_CHECKPOINT="checkpoints/deeplabv3_resnet50_random.pt"
 export SICM_BASELINE_OUTPUT_DIR="outputs/echojepa_baseline"
 
 python scripts/train_echojepa_baseline.py
 ~~~
 
-This script extracts adjacent primary-peak ED-to-ED cycles, uses EchoJEPA ViT-L features with mean pooling across tokens and cycles, and trains an MLP classifier. It does not use LV-area physiological features or self-supervised adaptation. Training uses 10 frozen-backbone Stage A epochs and 20 Stage B epochs, with the last two backbone blocks unfrozen in Stage B. Its supervised loss uses the positive-class weight described above. Training metrics are in-sample, not an independent validation estimate. The final checkpoint and training-derived segmentation normalization are written under the configured output directory.
+The direct EchoJEPA baseline uniformly samples 16 frames from the complete cine loop, resizes them to 224 x 224, converts grayscale input to three channels, applies the standard EchoJEPA normalization, and passes the clip through EchoJEPA ViT-L. All spatiotemporal tokens are combined by simple global mean pooling before a 1024-to-128-to-1 MLP classifier.
+
+The baseline explicitly contains **no LV segmentation, LV area-time curve, ED/ES detection, ED-to-ED cardiac-cycle alignment, self-supervised cross-cycle adaptation, spatial attention, temporal attention, physiological descriptors, or multiple-instance learning**.
+
+Training uses 10 frozen-backbone Stage A epochs and 20 Stage B epochs, with the last two EchoJEPA Transformer blocks and final backbone norm unfrozen in Stage B. The supervised loss uses the positive-class weight n_negative / n_positive. Training metrics are apparent/in-sample, not an independent validation estimate. The final checkpoint is written to outputs/echojepa_baseline/final_model.pt.
 
 ## Patient-level fivefold cross-validation
 
@@ -149,21 +152,21 @@ The full-model prediction CSV includes the pseudonymous ID, input filename/path 
 
 ### EchoJEPA baseline inference
 
-Run baseline inference against the same external video layout. Point it to the baseline checkpoint and its training-set segmentation normalization:
+Run the direct baseline against the same external-video layout. It uses the complete cine loop directly and therefore does not require an LV-segmentation checkpoint or segmentation-normalization file.
 
 ~~~bash
 export SICM_EXTERNAL_VIDEO_ROOT="/secure/path/external/videos"
 export SICM_CHECKPOINT_DIR="checkpoints"
 export ECHOJEPA_REPO_DIR="checkpoints/EchoJEPA"
-export LV_SEGMENTATION_CHECKPOINT="checkpoints/deeplabv3_resnet50_random.pt"
 export SICM_BASELINE_FINAL_MODEL="outputs/echojepa_baseline/final_model.pt"
-export SICM_BASELINE_SEGMENTATION_NORMALIZATION_CSV="outputs/echojepa_baseline/data_normalization.csv"
 export SICM_EXTERNAL_BASELINE_PREDICTIONS_CSV="outputs/external/echojepa_baseline_test_predictions.csv"
 
 python scripts/infer_echojepa_baseline.py
 ~~~
 
-This baseline also uses primary ED peaks and all adjacent cycles, then averages the visual cycle features. It does not use the LV-area physiological representation, labels, or test-time training. Its prediction CSV has the same `id` and `sicm_probability` fields expected by the evaluator.
+The inference script reproduces the deterministic training-time preprocessing: uniform 16-frame sampling from the complete cine loop, 224 x 224 resizing, grayscale-to-three-channel conversion, EchoJEPA normalization, EchoJEPA ViT-L, global mean pooling across all spatiotemporal tokens, and the locked MLP classifier. It does not use labels, LV segmentation, cardiac-cycle detection, physiology, attention, MIL, random augmentation, adaptation, or test-time fine-tuning.
+
+Its prediction CSV contains the pseudonymous ID, input filename/path, SICM probability, 0.5-threshold prediction, and success/error status.
 
 ## External evaluation
 
